@@ -1,0 +1,10 @@
+services:
+  ai-usage-server:
+    build: .
+    image: ai-usage-tracker-server:local
+    container_name: ai-usage-tracker-server
+    ports:
+      - "127.0.0.1:8318:8318"
+    volumes:
+      - ./data/server:/data
+    restart: unless-stopped
