@@ -34,6 +34,48 @@ Leave that process running while you use Codex.
 By default, the receiver binds only to `127.0.0.1`. Use `--allow-remote` only
 on a trusted network; OTEL payloads can contain sensitive local telemetry.
 
+### WSL autostart
+
+On WSL with systemd enabled, run the receiver as a user service so it starts
+automatically with the WSL user session:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/codex-usage-receiver.service <<'EOF'
+[Unit]
+Description=Codex usage tracker local receiver
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/james/ai-usage-tracker
+ExecStart=/usr/bin/python3 /home/james/ai-usage-tracker/codex_usage_observer.py --config /home/james/ai-usage-tracker/codex_usage_observer.toml client serve --host 127.0.0.1 --port 4318
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now codex-usage-receiver.service
+```
+
+Useful service commands:
+
+```bash
+systemctl --user status codex-usage-receiver.service --no-pager
+journalctl --user -u codex-usage-receiver.service -f
+systemctl --user restart codex-usage-receiver.service
+systemctl --user disable --now codex-usage-receiver.service
+```
+
+Check that it is listening:
+
+```bash
+ss -ltnp | rg ':4318'
+```
+
 Optional: use a config file to control what gets persisted:
 
 ```bash
