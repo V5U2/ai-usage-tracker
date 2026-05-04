@@ -136,6 +136,7 @@ class StorageConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
+    client_name: str = "local"
     storage: StorageConfig = field(default_factory=StorageConfig)
     redaction_keys: frozenset[str] = frozenset(SENSITIVE_ATTR_KEYS)
     redaction_key_parts: tuple[str, ...] = SENSITIVE_ATTR_PARTS
@@ -165,6 +166,13 @@ def list_config(data: dict[str, Any], key: str, default: Iterable[str]) -> tuple
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return tuple(value)
     raise ValueError(f"{key} must be a list of strings")
+
+
+def str_config(data: dict[str, Any], key: str, default: str) -> str:
+    value = data.get(key, default)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    raise ValueError(f"{key} must be a non-empty string")
 
 
 def load_config(path: Path | None) -> AppConfig:
@@ -199,6 +207,7 @@ def load_config(path: Path | None) -> AppConfig:
         max_body_bytes=int_config(storage_data, "max_body_bytes", DEFAULT_MAX_BODY_BYTES),
     )
     return AppConfig(
+        client_name=str_config(data, "client_name", "local"),
         storage=storage,
         redaction_keys=frozenset(key.lower() for key in list_config(redaction_data, "keys", SENSITIVE_ATTR_KEYS)),
         redaction_key_parts=tuple(

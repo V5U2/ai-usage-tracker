@@ -22,6 +22,7 @@ python3 codex_usage_observer.py --config codex_usage_observer.toml serve --port 
 
 Start from `codex_usage_observer.example.toml`. The main storage choices are:
 
+- `client_name`: names this machine/client for later aggregation.
 - `raw_payload_body`: store full raw OTEL payload bodies, or keep only metadata.
 - `extracted_attributes`: store extracted attributes as `redacted`, `full`, or `none`.
 - `model`, `session_id`, `thread_id`: choose whether these dimensions are stored on usage rows.

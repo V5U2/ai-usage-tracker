@@ -117,6 +117,15 @@ class ExtractionTests(unittest.TestCase):
             self.assertEqual(bytes(body), b"")
             con.close()
 
+    def test_load_config_reads_client_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('client_name = "work-laptop"\n', encoding="utf-8")
+
+            config = app.load_config(config_path)
+
+            self.assertEqual(config.client_name, "work-laptop")
+
 
 class DatabaseReportTests(unittest.TestCase):
     def test_report_rows_group_by_day_model(self):

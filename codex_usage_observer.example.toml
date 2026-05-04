@@ -1,3 +1,5 @@
+client_name = "local"
+
 [storage]
 # Store raw OTEL payload bodies for troubleshooting. Set false to keep only
 # payload metadata plus extracted token rows.
