@@ -15,9 +15,17 @@ Defaults:
 
 Import options:
 
-1. Copy `ai-usage-tracker.xml` to `/boot/config/plugins/dockerMan/templates-user/`
+1. Install the template with the deployment helper:
+
+   ```bash
+   UNRAID_HOST=root@unraid-host \
+   TEMPLATE_NAME=my-ai-usage-tracker.xml \
+   deploy/unraid/install-template.sh
+   ```
+
+2. Or copy `ai-usage-tracker.xml` to `/boot/config/plugins/dockerMan/templates-user/`
    on the Unraid host, then add the container from Docker templates.
-2. Or paste the template URL into Unraid's Docker template repository flow after
+3. Or paste the template URL into Unraid's Docker template repository flow after
    it is available from the default branch:
 
 ```text

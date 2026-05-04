@@ -37,6 +37,8 @@ Codex OTEL -> local collector -> local SQLite
 - `docker/`, `Dockerfile`, `docker-compose.yml`: containerized aggregation
   server setup.
 - `unraid/`: Unraid Docker template for deploying the aggregation server.
+- `deploy/`: deployment scripts for Unraid aggregation servers and macOS,
+  Linux, or WSL collectors.
 
 ## 1. Run a local collector
 
@@ -58,7 +60,19 @@ Leave that process running while you use Codex. Use `--allow-remote` only on a
 trusted network and only when you intentionally want a collector to receive OTEL
 from another host.
 
-### WSL autostart
+### WSL/Linux autostart
+
+For a script-driven install, use
+`deploy/collector/install-linux-systemd.sh`. It copies the collector into
+`~/.local/share/ai-usage-tracker`, writes a config, installs a user systemd
+service, and starts it:
+
+```bash
+AGGREGATION_ENDPOINT=http://server-host:8318 \
+COLLECTOR_API_KEY=ait_generated_token_from_admin_ui \
+CLIENT_NAME="$(hostname)" \
+deploy/collector/install-linux-systemd.sh
+```
 
 On WSL with systemd enabled, run the receiver as a user service so it starts
 automatically with the WSL user session:
@@ -119,6 +133,17 @@ The `[aggregation_server]` section is only used when this same checkout is also
 started with `server serve`.
 
 ### macOS auto-start with launchd
+
+For a script-driven install, use `deploy/collector/install-macos-launchd.sh`.
+It copies the collector into `~/Library/Application Support/ai-usage-tracker`,
+writes a config, installs a LaunchAgent, and starts it:
+
+```bash
+AGGREGATION_ENDPOINT=http://server-host:8318 \
+COLLECTOR_API_KEY=ait_generated_token_from_admin_ui \
+CLIENT_NAME="$(scutil --get LocalHostName 2>/dev/null || hostname)" \
+deploy/collector/install-macos-launchd.sh
+```
 
 Codex does not start the receiver automatically. On macOS, install a user
 LaunchAgent if you want the receiver to start when you log in:
@@ -333,10 +358,18 @@ deploys the aggregation server from GHCR, maps host port `18418` to the
 container's `8318/tcp`, and persists server SQLite data at
 `/mnt/user/Docker/ai-usage-tracker`.
 
-Copy the template to the Unraid host:
+Install the template on a remote Unraid host:
+
+```bash
+UNRAID_HOST=root@unraid-host \
+TEMPLATE_NAME=my-ai-usage-tracker.xml \
+deploy/unraid/install-template.sh
+```
+
+Or copy the template manually to the Unraid host:
 
 ```text
-/boot/config/plugins/dockerMan/templates-user/ai-usage-tracker.xml
+/boot/config/plugins/dockerMan/templates-user/my-ai-usage-tracker.xml
 ```
 
 Or import it from the raw template URL after it is available on the default
