@@ -295,7 +295,7 @@ unless that release action is intended.
 An Unraid Docker template is available at `unraid/ai-usage-tracker.xml`. It
 deploys the aggregation server from GHCR, maps host port `18418` to the
 container's `8318/tcp`, and persists server SQLite data at
-`/mnt/user/appdata/ai-usage-tracker`.
+`/mnt/user/Docker/ai-usage-tracker`.
 
 Copy the template to the Unraid host:
 

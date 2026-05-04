@@ -2,7 +2,7 @@
 
 `ai-usage-tracker.xml` is an Unraid Docker template for the aggregation server.
 It runs the published GHCR image and persists the server SQLite database under
-`/mnt/user/appdata/ai-usage-tracker`.
+`/mnt/user/Docker/ai-usage-tracker`.
 
 Defaults:
 
@@ -11,7 +11,7 @@ Defaults:
 - Admin UI: `http://<unraid-ip>:18418/admin`
 - Host port: `18418/tcp`
 - Container port: `8318/tcp`
-- App data: `/mnt/user/appdata/ai-usage-tracker` mapped to `/data`
+- App data: `/mnt/user/Docker/ai-usage-tracker` mapped to `/data`
 
 Import options:
 

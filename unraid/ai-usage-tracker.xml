@@ -22,5 +22,5 @@
   <DonateLink/>
   <Requires/>
   <Config Name="Web UI / API Port" Target="8318" Default="18418" Mode="tcp" Description="Host port for the aggregation server web UI, admin UI, reports, and ingestion API. The container listens on 8318/tcp." Type="Port" Display="always" Required="true" Mask="false">18418</Config>
-  <Config Name="Persistent Data" Target="/data" Default="/mnt/user/appdata/ai-usage-tracker" Mode="rw" Description="Stores the server SQLite database and WAL files." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/ai-usage-tracker</Config>
+  <Config Name="Persistent Data" Target="/data" Default="/mnt/user/Docker/ai-usage-tracker" Mode="rw" Description="Stores the server SQLite database and WAL files." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/Docker/ai-usage-tracker</Config>
 </Container>
