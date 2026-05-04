@@ -154,14 +154,24 @@ class ExtractionTests(unittest.TestCase):
         self.assertNotIn("arguments", attrs)
         self.assertNotIn("output", attrs)
 
-    def test_config_can_omit_raw_payload_body(self):
-        config = app.AppConfig(storage=app.StorageConfig(raw_payload_body=False))
+    def test_raw_payload_body_is_disabled_by_default(self):
+        config = app.AppConfig()
         with tempfile.TemporaryDirectory() as tmp:
             con = app.connect(Path(tmp) / "usage.sqlite")
             raw_id = app.insert_payload(con, "/v1/logs", "application/json", b'{"secret": true}', config)
             body = con.execute("select body from raw_payloads where id = ?", (raw_id,)).fetchone()["body"]
 
             self.assertEqual(bytes(body), b"")
+            con.close()
+
+    def test_config_can_keep_raw_payload_body(self):
+        config = app.AppConfig(storage=app.StorageConfig(raw_payload_body=True))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect(Path(tmp) / "usage.sqlite")
+            raw_id = app.insert_payload(con, "/v1/logs", "application/json", b'{"secret": true}', config)
+            body = con.execute("select body from raw_payloads where id = ?", (raw_id,)).fetchone()["body"]
+
+            self.assertEqual(bytes(body), b'{"secret": true}')
             con.close()
 
     def test_load_config_reads_client_name(self):
@@ -399,6 +409,7 @@ class DatabaseReportTests(unittest.TestCase):
                     extracted_attributes="none",
                 )
             )
+            raw_config = app.AppConfig(storage=app.StorageConfig(raw_payload_body=True))
             payload = log_payload(
                 {
                     "event.name": "response.completed",
@@ -407,7 +418,7 @@ class DatabaseReportTests(unittest.TestCase):
                     "output_tokens": 6,
                 }
             )
-            raw_id = app.insert_payload(con, "/v1/logs", "application/json", json.dumps(payload).encode())
+            raw_id = app.insert_payload(con, "/v1/logs", "application/json", json.dumps(payload).encode(), raw_config)
             empty_raw_id = app.insert_payload(con, "/v1/logs", "application/json", b"", config)
             app.insert_usage(
                 con,
@@ -835,14 +846,18 @@ class ClientSyncTests(unittest.TestCase):
 class ServerHttpTests(unittest.TestCase):
     def assertSharedNav(self, body, active):
         expected = {
-            "admin": '<nav><a href="/admin" class="active">Admin</a><a href="/reports">Usage</a><a href="/tools">Tools</a></nav>',
-            "usage": '<nav><a href="/admin">Admin</a><a href="/reports" class="active">Usage</a><a href="/tools">Tools</a></nav>',
-            "tools": '<nav><a href="/admin">Admin</a><a href="/reports">Usage</a><a href="/tools" class="active">Tools</a></nav>',
+            "admin": '<nav><div class="nav-primary"><a href="/reports">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin" class="active">Admin</a></div></nav>',
+            "usage": '<nav><div class="nav-primary"><a href="/reports" class="active">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
+            "tools": '<nav><div class="nav-primary"><a href="/reports">Token Usage</a><a href="/tools" class="active">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
         }[active]
         self.assertIn(expected, body)
         self.assertIn('href="/admin"', body)
         self.assertIn('href="/reports"', body)
         self.assertIn('href="/tools"', body)
+        self.assertIn('html[data-theme="dark"]', body)
+        self.assertIn('localStorage.getItem("ait-theme")', body)
+        self.assertIn('rel="icon" type="image/svg+xml"', body)
+        self.assertIn("M5%209.2H7V19H5V9.2", body)
 
     def test_server_ingest_auth_duplicate_and_revoked_token(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -991,6 +1006,8 @@ class ServerHttpTests(unittest.TestCase):
             self.assertNotIn("<td>laptop</td>", body)
             self.assertIn("<td>gpt-test</td>", body)
             self.assertIn("<td class=\"num\">15</td>", body)
+            self.assertIn('data-utc="2026-05-04T01:02:03+00:00"', body)
+            self.assertIn("formatBrowserTimes", body)
             con.close()
 
     def test_tool_reports_page_renders_tool_totals(self):
@@ -1032,6 +1049,8 @@ class ServerHttpTests(unittest.TestCase):
             self.assertNotIn("<td>laptop</td>", body)
             self.assertIn("<td>exec_command</td>", body)
             self.assertIn("<td class=\"num\">42</td>", body)
+            self.assertIn('data-utc="2026-05-04T01:02:03+00:00"', body)
+            self.assertIn("Intl.DateTimeFormat", body)
             con.close()
 
     def test_tool_reports_can_include_decisions_and_results(self):
@@ -1095,6 +1114,7 @@ class ServerHttpTests(unittest.TestCase):
             self.assertSharedNav(body, "admin")
             self.assertIn("New token, shown once", body)
             self.assertIn(token, body)
+            self.assertIn('class="browser-time" data-utc=', body)
 
             row = con.execute("select display_name, token_hash, revoked_at from clients where client_name = 'laptop'").fetchone()
             self.assertEqual(row["display_name"], "Laptop")

@@ -6,7 +6,7 @@ port = 8318
 db = "/data/codex_usage_server.sqlite"
 
 [storage]
-raw_payload_body = true
+raw_payload_body = false
 extracted_attributes = "redacted"
 model = true
 session_id = true

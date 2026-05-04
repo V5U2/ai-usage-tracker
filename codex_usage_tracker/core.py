@@ -173,13 +173,14 @@ NUMERIC_COLUMNS = {
     "error_rows",
 }
 TIME_COLUMNS = {"first_seen", "last_seen", "source_received_at", "newest_local", "newest_synced", "last_synced_at"}
+HTML_TIME_COLUMNS = TIME_COLUMNS | {"created_at", "updated_at", "revoked_at"}
 TOOL_EVENT_NAMES = {"codex.tool_decision", "codex.tool_result"}
 VERBOSE_TOOL_ATTRS = {"arguments", "output"}
 
 
 @dataclass(frozen=True)
 class StorageConfig:
-    raw_payload_body: bool = True
+    raw_payload_body: bool = False
     extracted_attributes: str = "redacted"
     model: bool = True
     session_id: bool = True
@@ -370,7 +371,7 @@ def load_config(path: Path | None) -> AppConfig:
         raise ValueError('storage.extracted_attributes must be "redacted", "full", or "none"')
 
     storage = StorageConfig(
-        raw_payload_body=bool_config(storage_data, "raw_payload_body", True),
+        raw_payload_body=bool_config(storage_data, "raw_payload_body", False),
         extracted_attributes=str(extracted_attributes),
         model=bool_config(storage_data, "model", True),
         session_id=bool_config(storage_data, "session_id", True),
@@ -1191,6 +1192,23 @@ def format_cell(column: str, value: Any) -> str:
     return str(value)
 
 
+def server_html_cell(column: str, value: Any, *, classes: str = "") -> str:
+    class_names = [name for name in classes.split() if name]
+    if column in HTML_TIME_COLUMNS:
+        class_names.append("browser-time")
+        class_attr = f' class="{" ".join(class_names)}"' if class_names else ""
+        if value in (None, ""):
+            return f"<td{class_attr}></td>"
+        raw = str(value)
+        fallback = format_timestamp(raw)
+        return (
+            f'<td{class_attr} data-utc="{html.escape(raw, quote=True)}" '
+            f'title="{html.escape(raw, quote=True)}">{html.escape(fallback)}</td>'
+        )
+    class_attr = f' class="{html.escape(classes, quote=True)}"' if classes else ""
+    return f"<td{class_attr}>{html.escape(format_cell(column, value))}</td>"
+
+
 def default_columns(group_by: str) -> tuple[str, ...]:
     if group_by == "total":
         return (
@@ -1406,52 +1424,126 @@ def print_table(rows: Sequence[sqlite3.Row], columns: Sequence[str] = REPORT_COL
 
 def server_nav(active: str) -> str:
     items = (
-        ("admin", "/admin", "Admin"),
-        ("usage", "/reports", "Usage"),
-        ("tools", "/tools", "Tools"),
+        ("usage", "/reports", "Token Usage"),
+        ("tools", "/tools", "Tool Usage"),
     )
     links = []
     for key, href, label in items:
         active_attr = ' class="active"' if key == active else ""
         links.append(f'<a href="{href}"{active_attr}>{label}</a>')
-    return "<nav>" + "".join(links) + "</nav>"
+    admin_attr = ' class="active"' if active == "admin" else ""
+    return (
+        "<nav>"
+        f'<div class="nav-primary">{"".join(links)}</div>'
+        '<div class="nav-actions">'
+        '<button type="button" class="theme-toggle" title="Toggle dark mode" '
+        'aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button>'
+        f'<a href="/admin"{admin_attr}>Admin</a>'
+        "</div>"
+        "</nav>"
+    )
+
+
+def server_theme_script() -> str:
+    return """
+(function () {
+  function preferredTheme() {
+    try {
+      var stored = localStorage.getItem("ait-theme");
+      if (stored === "dark" || stored === "light") return stored;
+      if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+    } catch (error) {}
+    return "light";
+  }
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    var button = document.querySelector(".theme-toggle");
+    if (button) button.textContent = theme === "dark" ? "Light" : "Dark";
+  }
+  window.aitToggleTheme = function () {
+    var next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    try { localStorage.setItem("ait-theme", next); } catch (error) {}
+    applyTheme(next);
+  };
+  function formatBrowserTimes() {
+    if (!window.Intl || !Intl.DateTimeFormat) return;
+    var formatter = new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      timeZoneName: "short"
+    });
+    document.querySelectorAll("[data-utc]").forEach(function (element) {
+      var raw = element.getAttribute("data-utc");
+      if (!raw) return;
+      var parsed = new Date(raw);
+      if (Number.isNaN(parsed.getTime())) return;
+      element.textContent = formatter.format(parsed);
+      element.title = raw;
+    });
+  }
+  applyTheme(preferredTheme());
+  document.addEventListener("DOMContentLoaded", function () {
+    applyTheme(document.documentElement.dataset.theme || preferredTheme());
+    formatBrowserTimes();
+  });
+}());
+"""
+
+
+def server_favicon_link() -> str:
+    # MDI chart-bar icon: https://pictogrammers.com/library/mdi/icon/chart-bar/
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+        '<path fill="#17202a" d="M5 9.2H7V19H5V9.2M10.6 5H12.6V19H10.6V5M16.2 '
+        '13H18.2V19H16.2V13M3 21H21V22H3V21Z"/></svg>'
+    )
+    return f'<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,{parse.quote(svg)}">'
 
 
 def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
     extra = ""
     if tools:
         extra += """
-    .status { display: inline-block; min-width: 2.4rem; text-align: center; padding: .12rem .35rem; border: 1px solid #cfd7df; font-size: .78rem; }
-    .status.ok { background: #eaf7ee; border-color: #afd9bb; color: #1d6b38; }
-    .status.fail { background: #fdecec; border-color: #efb1b1; color: #9f1d1d; }
-    .status.neutral { background: #f3f6f8; color: #52606d; }
+    .status { display: inline-block; min-width: 2.4rem; text-align: center; padding: .12rem .35rem; border: 1px solid var(--border-strong); font-size: .78rem; }
+    .status.ok { background: var(--ok-bg); border-color: var(--ok-border); color: var(--ok-text); }
+    .status.fail { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger-text); }
+    .status.neutral { background: var(--surface-soft); color: var(--muted); }
 """
     if admin:
         extra += """
     form.inline { display: inline; }
-    .token { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #f7f9fb; padding: .5rem; }
-    .message { border: 1px solid #cfd7df; padding: .6rem; background: white; }
+    .token { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-soft); padding: .5rem; }
+    .message { border: 1px solid var(--border-strong); padding: .6rem; background: var(--surface); }
 """
     return f"""
-    body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #17202a; background: #fbfcfd; }}
-    nav {{ display: flex; gap: .5rem; margin-bottom: 1.5rem; }}
-    nav a {{ border: 1px solid #cfd7df; color: #17202a; padding: .4rem .65rem; text-decoration: none; background: white; }}
-    nav a.active {{ background: #17202a; color: white; border-color: #17202a; }}
+    :root {{ color-scheme: light; --bg: #fbfcfd; --text: #17202a; --muted: #5b6773; --surface: #ffffff; --surface-soft: #f3f6f8; --border: #d7dde3; --border-strong: #cfd7df; --active-bg: #17202a; --active-text: #ffffff; --danger-bg: #fdecec; --danger-border: #efb1b1; --danger-text: #9f1d1d; --ok-bg: #eaf7ee; --ok-border: #afd9bb; --ok-text: #1d6b38; }}
+    html[data-theme="dark"] {{ color-scheme: dark; --bg: #111418; --text: #edf2f7; --muted: #a8b3bf; --surface: #181d23; --surface-soft: #202731; --border: #303946; --border-strong: #465160; --active-bg: #edf2f7; --active-text: #111418; --danger-bg: #3a1f24; --danger-border: #7d3941; --danger-text: #ffb8c1; --ok-bg: #173321; --ok-border: #315f40; --ok-text: #a9e7b8; }}
+    body {{ font-family: system-ui, sans-serif; margin: 2rem; color: var(--text); background: var(--bg); }}
+    nav {{ display: flex; gap: .75rem; margin-bottom: 1.5rem; align-items: center; }}
+    .nav-primary, .nav-actions {{ display: flex; gap: .5rem; align-items: center; }}
+    .nav-actions {{ margin-left: auto; }}
+    nav a, .theme-toggle {{ border: 1px solid var(--border-strong); color: var(--text); padding: .4rem .65rem; text-decoration: none; background: var(--surface); font: inherit; }}
+    nav a.active {{ background: var(--active-bg); color: var(--active-text); border-color: var(--active-bg); }}
+    .theme-toggle {{ cursor: pointer; }}
     main {{ display: grid; gap: 1.25rem; }}
-    table {{ border-collapse: collapse; width: 100%; background: white; }}
-    th, td {{ border-bottom: 1px solid #d7dde3; padding: .5rem; text-align: left; vertical-align: top; }}
-    th {{ background: #f3f6f8; font-size: .82rem; color: #52606d; }}
-    input, select {{ padding: .4rem; border: 1px solid #cfd7df; background: white; }}
-    button {{ padding: .42rem .7rem; border: 1px solid #17202a; background: #17202a; color: white; }}
-    .filters {{ display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; background: white; border: 1px solid #d7dde3; padding: .85rem; }}
+    table {{ border-collapse: collapse; width: 100%; background: var(--surface); }}
+    th, td {{ border-bottom: 1px solid var(--border); padding: .5rem; text-align: left; vertical-align: top; }}
+    th {{ background: var(--surface-soft); font-size: .82rem; color: var(--muted); }}
+    input, select {{ padding: .4rem; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }}
+    button {{ padding: .42rem .7rem; border: 1px solid var(--active-bg); background: var(--active-bg); color: var(--active-text); }}
+    .filters {{ display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; background: var(--surface); border: 1px solid var(--border); padding: .85rem; }}
     .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .75rem; }}
-    .summary div {{ border: 1px solid #d7dde3; padding: .75rem; background: white; }}
+    .summary div {{ border: 1px solid var(--border); padding: .75rem; background: var(--surface); }}
     .panel {{ display: grid; gap: .75rem; }}
     .panel-head {{ display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; }}
     .panel-head h2 {{ margin: 0; font-size: 1.05rem; }}
     .quick-links {{ display: flex; flex-wrap: wrap; gap: .5rem; }}
-    .quick-links a {{ border: 1px solid #cfd7df; padding: .3rem .5rem; color: #17202a; text-decoration: none; background: white; }}
-    .label {{ color: #5b6773; font-size: .82rem; }}
+    .quick-links a {{ border: 1px solid var(--border-strong); padding: .3rem .5rem; color: var(--text); text-decoration: none; background: var(--surface); }}
+    .label {{ color: var(--muted); font-size: .82rem; }}
     .value {{ font-size: 1.2rem; font-weight: 650; }}
     .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
     label {{ display: grid; gap: .25rem; }}
@@ -1641,8 +1733,8 @@ class ServerReceiver(BaseHTTPRequestHandler):
         for row in rows:
             cells = []
             for column in columns:
-                classes = ' class="num"' if column in NUMERIC_COLUMNS else ""
-                cells.append(f"<td{classes}>{html.escape(format_cell(column, row[column]))}</td>")
+                classes = "num" if column in NUMERIC_COLUMNS else ""
+                cells.append(server_html_cell(column, row[column], classes=classes))
             table_rows.append(f"<tr>{''.join(cells)}</tr>")
         headers = "".join(f"<th>{html.escape(DISPLAY_NAMES.get(column, column))}</th>" for column in columns)
         empty_row = f'<tr><td colspan="{len(columns)}">No matching usage events.</td></tr>'
@@ -1653,11 +1745,15 @@ class ServerReceiver(BaseHTTPRequestHandler):
 
         nav = server_nav("usage")
         styles = server_page_styles()
+        theme_script = server_theme_script()
+        favicon = server_favicon_link()
         return f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>AI Usage Tracker Reports</title>
+  {favicon}
+  <script>{theme_script}</script>
   <style>{styles}</style>
 </head>
 <body>
@@ -1718,8 +1814,8 @@ class ServerReceiver(BaseHTTPRequestHandler):
         for row in rows:
             cells = []
             for column in columns:
-                classes = ' class="num"' if column in NUMERIC_COLUMNS else ""
-                cells.append(f"<td{classes}>{html.escape(format_cell(column, row[column]))}</td>")
+                classes = "num" if column in NUMERIC_COLUMNS else ""
+                cells.append(server_html_cell(column, row[column], classes=classes))
             table_rows.append(f"<tr>{''.join(cells)}</tr>")
         headers = "".join(f"<th>{html.escape(DISPLAY_NAMES.get(column, column))}</th>" for column in columns)
         empty_row = f'<tr><td colspan="{len(columns)}">No matching tool events.</td></tr>'
@@ -1727,14 +1823,13 @@ class ServerReceiver(BaseHTTPRequestHandler):
         for row in recent_rows:
             cells = []
             for column in recent_columns:
-                value = format_cell(column, row[column])
                 if column == "success":
                     status_class = "ok" if row[column] == "true" else "fail" if row[column] == "false" else "neutral"
                     value = "ok" if row[column] == "true" else "fail" if row[column] == "false" else ""
                     cells.append(f'<td><span class="status {status_class}">{html.escape(value)}</span></td>')
                     continue
-                classes = ' class="num"' if column in NUMERIC_COLUMNS else ""
-                cells.append(f"<td{classes}>{html.escape(value)}</td>")
+                classes = "num" if column in NUMERIC_COLUMNS else ""
+                cells.append(server_html_cell(column, row[column], classes=classes))
             recent_table_rows.append(f"<tr>{''.join(cells)}</tr>")
         recent_headers = "".join(
             f"<th>{html.escape(DISPLAY_NAMES.get(column, column))}</th>" for column in recent_columns
@@ -1747,11 +1842,15 @@ class ServerReceiver(BaseHTTPRequestHandler):
 
         nav = server_nav("tools")
         styles = server_page_styles(tools=True)
+        theme_script = server_theme_script()
+        favicon = server_favicon_link()
         return f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>AI Usage Tracker Tool Reports</title>
+  {favicon}
+  <script>{theme_script}</script>
   <style>{styles}</style>
 </head>
 <body>
@@ -1814,8 +1913,6 @@ class ServerReceiver(BaseHTTPRequestHandler):
         for client in clients:
             client_name = html.escape(client["client_name"])
             display_name = html.escape(client["display_name"])
-            revoked = html.escape(client["revoked_at"] or "")
-            last_seen = html.escape(client["last_seen_at"] or "")
             status = "revoked" if client["revoked_at"] else "active"
             revoke_button = (
                 ""
@@ -1849,10 +1946,10 @@ class ServerReceiver(BaseHTTPRequestHandler):
                     </form>
                   </td>
                   <td>{status}</td>
-                  <td>{html.escape(client["created_at"])}</td>
-                  <td>{html.escape(client["updated_at"])}</td>
-                  <td>{last_seen}</td>
-                  <td>{revoked}</td>
+                  {server_html_cell("created_at", client["created_at"])}
+                  {server_html_cell("updated_at", client["updated_at"])}
+                  {server_html_cell("last_seen", client["last_seen_at"])}
+                  {server_html_cell("revoked_at", client["revoked_at"])}
                   <td>{revoke_button}{delete_button}</td>
                 </tr>
                 """
@@ -1868,11 +1965,15 @@ class ServerReceiver(BaseHTTPRequestHandler):
         message_block = f"<section class=\"notice\">{html.escape(message)}</section>" if message else ""
         nav = server_nav("admin")
         styles = server_page_styles(admin=True)
+        theme_script = server_theme_script()
+        favicon = server_favicon_link()
         return f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>AI Usage Tracker Admin</title>
+  {favicon}
+  <script>{theme_script}</script>
   <style>{styles}</style>
 </head>
 <body>
