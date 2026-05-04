@@ -86,6 +86,14 @@ extracted usage rows from stored raw payloads:
 python3 codex_usage_observer.py --config codex_usage_observer.toml reindex
 ```
 
+To also apply storage-retention settings to existing rows, for example clearing
+previously stored raw payload bodies after setting `raw_payload_body = false`,
+run:
+
+```bash
+python3 codex_usage_observer.py --config codex_usage_observer.toml cleanup
+```
+
 ## Reports
 
 `report` supports these groupings:

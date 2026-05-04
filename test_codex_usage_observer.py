@@ -126,6 +126,25 @@ class ExtractionTests(unittest.TestCase):
 
             self.assertEqual(config.client_name, "work-laptop")
 
+    def test_serve_payload_log_line_includes_ingestion_details(self):
+        line = app.serve_payload_log_line(
+            path="/v1/logs",
+            content_type="application/json",
+            body_bytes=1536,
+            shape="resourceLogs",
+            raw_body_retained=False,
+            events=2,
+            raw_id=42,
+        )
+
+        self.assertIn("received /v1/logs", line)
+        self.assertIn("payload=1.5 KiB", line)
+        self.assertIn("shape=resourceLogs", line)
+        self.assertIn("content_type=application/json", line)
+        self.assertIn("raw_body=metadata-only", line)
+        self.assertIn("usage_events=2", line)
+        self.assertIn("raw_id=42", line)
+
 
 class DatabaseReportTests(unittest.TestCase):
     def test_report_rows_group_by_day_model(self):
@@ -169,6 +188,89 @@ class DatabaseReportTests(unittest.TestCase):
             self.assertEqual(rows[0]["period"], "2026-05-04")
             self.assertEqual(rows[0]["model"], "gpt-test")
             self.assertEqual(rows[0]["total_tokens"], 10)
+            con.close()
+
+    def test_cleanup_reindexes_before_clearing_raw_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "usage.sqlite"
+            con = app.connect(db)
+            config = app.AppConfig(
+                storage=app.StorageConfig(
+                    raw_payload_body=False,
+                    extracted_attributes="none",
+                )
+            )
+            payload = log_payload(
+                {
+                    "event.name": "response.completed",
+                    "model": "gpt-test",
+                    "input_tokens": 4,
+                    "output_tokens": 6,
+                }
+            )
+            raw_id = app.insert_payload(con, "/v1/logs", "application/json", json.dumps(payload).encode())
+            empty_raw_id = app.insert_payload(con, "/v1/logs", "application/json", b"", config)
+            app.insert_usage(
+                con,
+                raw_id,
+                "2026-05-04T01:02:03+00:00",
+                [
+                    {
+                        "signal": "logs",
+                        "event_name": "stale",
+                        "model": "stale-model",
+                        "session_id": "stale-session",
+                        "thread_id": None,
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "cached_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "attributes_json": '{"stale": true}',
+                    }
+                ],
+            )
+            app.insert_usage(
+                con,
+                empty_raw_id,
+                "2026-05-04T02:00:00+00:00",
+                [
+                    {
+                        "signal": "logs",
+                        "event_name": "already-clean",
+                        "model": "gpt-clean",
+                        "session_id": "clean-session",
+                        "thread_id": None,
+                        "input_tokens": 2,
+                        "output_tokens": 3,
+                        "total_tokens": 5,
+                        "cached_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "attributes_json": '{"authorization": "token", "kept": true}',
+                    }
+                ],
+            )
+
+            preserved_events = app.usage_events_without_reindexable_raw(con, config)
+            raw_count, inserted = app.reindex_database(con, config)
+            for preserved_raw_id, received_at, event in preserved_events:
+                app.insert_usage(con, preserved_raw_id, received_at, [event])
+            cleared_payloads = app.cleanup_stored_data(con, config)
+            con.commit()
+
+            events = {row["model"]: row for row in con.execute("select * from usage_events").fetchall()}
+            body = con.execute("select body from raw_payloads where id = ?", (raw_id,)).fetchone()["body"]
+
+            self.assertEqual(raw_count, 2)
+            self.assertEqual(inserted, 1)
+            self.assertEqual(len(preserved_events), 1)
+            self.assertEqual(cleared_payloads, 1)
+            self.assertEqual(bytes(body), b"")
+            self.assertEqual(set(events), {"gpt-test", "gpt-clean"})
+            self.assertEqual(events["gpt-test"]["total_tokens"], 10)
+            self.assertEqual(events["gpt-test"]["attributes_json"], "{}")
+            self.assertEqual(events["gpt-clean"]["total_tokens"], 5)
+            self.assertEqual(events["gpt-clean"]["attributes_json"], "{}")
             con.close()
 
 

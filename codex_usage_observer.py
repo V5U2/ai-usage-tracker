@@ -630,6 +630,50 @@ def format_timestamp(value: str | None) -> str:
     return value.replace("T", " ").replace("+00:00", "Z")
 
 
+def format_bytes(value: int) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if amount < 1024 or unit == "GiB":
+            if unit == "B":
+                return f"{int(amount)} {unit}"
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{amount:.1f} GiB"
+
+
+def payload_shape(content_type: str | None, body: bytes) -> str:
+    if not content_type or "json" not in content_type:
+        return content_type or "unknown"
+    if not body:
+        return "empty-json"
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "invalid-json"
+    if isinstance(payload, dict) and payload:
+        return ",".join(str(key) for key in payload.keys())
+    return type(payload).__name__
+
+
+def serve_payload_log_line(
+    *,
+    path: str,
+    content_type: str | None,
+    body_bytes: int,
+    shape: str,
+    raw_body_retained: bool,
+    events: int,
+    raw_id: int,
+) -> str:
+    raw_state = "kept" if raw_body_retained else "metadata-only"
+    content = content_type or "-"
+    return (
+        f"{time.strftime('%H:%M:%S')} received {path} "
+        f"payload={format_bytes(body_bytes)} shape={shape} content_type={content} "
+        f"raw_body={raw_state} usage_events={events} raw_id={raw_id}"
+    )
+
+
 def format_cell(column: str, value: Any) -> str:
     if value in (None, ""):
         return ""
@@ -767,10 +811,15 @@ class Receiver(BaseHTTPRequestHandler):
             self.send_header("content-type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"error":"payload too large"}')
+            sys.stderr.write(
+                f"{time.strftime('%H:%M:%S')} rejected {self.path} "
+                f"payload={format_bytes(length)} max={format_bytes(self.app_config.storage.max_body_bytes)}\n"
+            )
             return
         body = self.rfile.read(length)
         content_type = self.headers.get("content-type")
         received_at = now_iso()
+        shape = payload_shape(content_type, body)
 
         con = connect(self.db_path)
         try:
@@ -790,9 +839,21 @@ class Receiver(BaseHTTPRequestHandler):
         self.send_header("content-type", "application/json")
         self.end_headers()
         self.wfile.write(b"{}")
+        sys.stderr.write(
+            serve_payload_log_line(
+                path=self.path,
+                content_type=content_type,
+                body_bytes=len(body),
+                shape=shape,
+                raw_body_retained=self.app_config.storage.raw_payload_body,
+                events=len(events),
+                raw_id=raw_id,
+            )
+            + "\n"
+        )
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+        return
 
 
 def serve(args: argparse.Namespace) -> None:
@@ -808,7 +869,13 @@ def serve(args: argparse.Namespace) -> None:
     connect(Receiver.db_path).close()
     server = ThreadingHTTPServer((args.host, args.port), Receiver)
     print(f"Listening on http://{args.host}:{args.port}; db={Receiver.db_path}", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping receiver.", file=sys.stderr, flush=True)
+        raise SystemExit(130) from None
+    finally:
+        server.server_close()
 
 
 def summary(args: argparse.Namespace) -> None:
@@ -906,33 +973,108 @@ def stats(args: argparse.Namespace) -> None:
         con.close()
 
 
+def reindex_database(con: sqlite3.Connection, config: AppConfig, *, keep_existing: bool = False) -> tuple[int, int]:
+    if not keep_existing:
+        con.execute("delete from usage_events")
+    rows = con.execute(
+        """
+        select id, received_at, path, content_type, body
+        from raw_payloads
+        order by id
+        """
+    ).fetchall()
+    inserted = 0
+    for row in rows:
+        content_type = row["content_type"] or ""
+        body = bytes(row["body"])
+        if "json" not in content_type or not body:
+            continue
+        try:
+            events = extract_usage(row["path"], body, config)
+        except Exception as exc:
+            sys.stderr.write(f"parse error for raw payload {row['id']}: {exc}\n")
+            continue
+        insert_usage(con, row["id"], row["received_at"], events)
+        inserted += len(events)
+    return len(rows), inserted
+
+
+def event_from_stored_row(row: sqlite3.Row, config: AppConfig) -> dict[str, Any]:
+    attrs: dict[str, Any] = {}
+    try:
+        loaded_attrs = json.loads(row["attributes_json"])
+        if isinstance(loaded_attrs, dict):
+            attrs = loaded_attrs
+    except json.JSONDecodeError:
+        attrs = {}
+    return {
+        "signal": row["signal"],
+        "event_name": row["event_name"],
+        "model": row["model"] if config.storage.model else None,
+        "session_id": row["session_id"] if config.storage.session_id else None,
+        "thread_id": row["thread_id"] if config.storage.thread_id else None,
+        "input_tokens": row["input_tokens"],
+        "output_tokens": row["output_tokens"],
+        "total_tokens": row["total_tokens"],
+        "cached_tokens": row["cached_tokens"],
+        "reasoning_tokens": row["reasoning_tokens"],
+        "attributes_json": stored_attributes_json(attrs, config),
+    }
+
+
+def usage_events_without_reindexable_raw(
+    con: sqlite3.Connection,
+    config: AppConfig,
+) -> list[tuple[int, str, dict[str, Any]]]:
+    rows = con.execute(
+        """
+        select usage_events.*
+        from usage_events
+        join raw_payloads on raw_payloads.id = usage_events.raw_payload_id
+        where length(raw_payloads.body) = 0 or coalesce(raw_payloads.content_type, '') not like '%json%'
+        order by usage_events.id
+        """
+    ).fetchall()
+    return [(row["raw_payload_id"], row["received_at"], event_from_stored_row(row, config)) for row in rows]
+
+
+def cleanup_stored_data(con: sqlite3.Connection, config: AppConfig) -> int:
+    cleared_payloads = 0
+    if not config.storage.raw_payload_body:
+        cleared_payloads = con.execute("select count(*) from raw_payloads where length(body) > 0").fetchone()[0]
+        con.execute("update raw_payloads set body = X'' where length(body) > 0")
+    return int(cleared_payloads)
+
+
 def reindex(args: argparse.Namespace) -> None:
     con = connect(Path(args.db))
     config = load_config(Path(args.config))
     try:
-        if not args.keep_existing:
-            con.execute("delete from usage_events")
-        rows = con.execute(
-            """
-            select id, received_at, path, content_type, body
-            from raw_payloads
-            order by id
-            """
-        ).fetchall()
-        inserted = 0
-        for row in rows:
-            content_type = row["content_type"] or ""
-            if "json" not in content_type:
-                continue
-            try:
-                events = extract_usage(row["path"], bytes(row["body"]), config)
-            except Exception as exc:
-                sys.stderr.write(f"parse error for raw payload {row['id']}: {exc}\n")
-                continue
-            insert_usage(con, row["id"], row["received_at"], events)
-            inserted += len(events)
+        raw_count, inserted = reindex_database(con, config, keep_existing=args.keep_existing)
         con.commit()
-        print(f"Reindexed {len(rows)} raw payloads; inserted {inserted} usage events.")
+        print(f"Reindexed {raw_count} raw payloads; inserted {inserted} usage events.")
+    finally:
+        con.close()
+
+
+def cleanup(args: argparse.Namespace) -> None:
+    con = connect(Path(args.db))
+    config = load_config(Path(args.config))
+    try:
+        preserved_events = usage_events_without_reindexable_raw(con, config)
+        raw_count, inserted = reindex_database(con, config)
+        for raw_id, received_at, event in preserved_events:
+            insert_usage(con, raw_id, received_at, [event])
+        cleared_payloads = cleanup_stored_data(con, config)
+        con.commit()
+        print(
+            f"Reindexed {raw_count} raw payloads; inserted {inserted} usage events; "
+            f"preserved {len(preserved_events)} existing usage events without raw bodies."
+        )
+        if config.storage.raw_payload_body:
+            print("Raw payload bodies kept because storage.raw_payload_body is true.")
+        else:
+            print(f"Cleared stored bodies from {cleared_payloads} raw payloads.")
     finally:
         con.close()
 
@@ -1032,6 +1174,9 @@ def main() -> int:
     p_reindex = sub.add_parser("reindex", parents=[db_parent], help="Rebuild usage events from stored raw payloads")
     p_reindex.add_argument("--keep-existing", action="store_true")
     p_reindex.set_defaults(func=reindex)
+
+    p_cleanup = sub.add_parser("cleanup", parents=[db_parent], help="Apply current storage config to existing data")
+    p_cleanup.set_defaults(func=cleanup)
 
     p_samples = sub.add_parser("samples", parents=[db_parent])
     p_samples.add_argument("--limit", type=int, default=10)
