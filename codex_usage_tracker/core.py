@@ -1477,8 +1477,9 @@ class Receiver(BaseHTTPRequestHandler):
             insert_usage(con, raw_id, received_at, events)
             insert_tool_events(con, raw_id, received_at, tool_events)
             con.commit()
-            if events and self.app_config.server.endpoint and self.app_config.server.api_key:
-                _, _, sync_error = sync_pending_usage(con, self.app_config, limit=len(events))
+            if (events or tool_events) and self.app_config.server.endpoint and self.app_config.server.api_key:
+                sync_limit = max(len(events), len(tool_events))
+                _, _, sync_error = sync_pending_usage(con, self.app_config, limit=sync_limit)
                 con.commit()
                 if sync_error:
                     sys.stderr.write(f"sync error for {self.path}: {sync_error}\n")

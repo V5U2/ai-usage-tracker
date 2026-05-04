@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 import tempfile
 import unittest
@@ -634,6 +635,53 @@ class ClientSyncTests(unittest.TestCase):
             self.assertEqual(row["synced_server_key"], app.sync_server_key(config))
             self.assertIsNone(row["last_sync_error"])
             con.close()
+
+    def test_receiver_forwards_tool_only_payloads(self):
+        payload = log_payload(
+            {
+                "event.name": "codex.tool_result",
+                "model": "gpt-test",
+                "tool_name": "exec_command",
+                "call_id": "call-1",
+                "success": "true",
+                "duration_ms": "42",
+            }
+        )
+        body = json.dumps(payload).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "usage.sqlite"
+            handler = object.__new__(app.Receiver)
+            handler.db_path = db
+            handler.app_config = app.AppConfig(
+                server=app.RemoteServerConfig(endpoint="http://server", api_key="secret")
+            )
+            handler.path = "/v1/logs"
+            handler.headers = {"content-length": str(len(body)), "content-type": "application/json"}
+            handler.rfile = io.BytesIO(body)
+            handler.wfile = io.BytesIO()
+            responses = []
+            handler.send_response = responses.append
+            handler.send_header = lambda _key, _value: None
+            handler.end_headers = lambda: None
+
+            with patch.object(
+                core,
+                "post_usage_batch",
+                return_value={"accepted": 0, "duplicates": 0, "accepted_tool_events": 1, "duplicate_tool_events": 0},
+            ) as post:
+                handler.do_POST()
+
+            con = app.connect(db)
+            usage_count = con.execute("select count(*) from usage_events").fetchone()[0]
+            tool_row = con.execute("select synced_at, synced_server_key from tool_events").fetchone()
+            con.close()
+
+            self.assertEqual(responses, [200])
+            self.assertEqual(usage_count, 0)
+            self.assertIsNotNone(tool_row)
+            self.assertIsNotNone(tool_row["synced_at"])
+            self.assertEqual(tool_row["synced_server_key"], app.sync_server_key(handler.app_config))
+            self.assertEqual(post.call_count, 1)
 
 
 class ServerHttpTests(unittest.TestCase):
