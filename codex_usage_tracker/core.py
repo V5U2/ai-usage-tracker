@@ -243,6 +243,19 @@ def optional_str_config(data: dict[str, Any], key: str) -> str | None:
     raise ValueError(f"{key} must be a non-empty string when provided")
 
 
+def table_config(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be a table/object")
+    return value
+
+
+def merged_table_config(data: dict[str, Any], legacy_key: str, key: str) -> dict[str, Any]:
+    legacy = table_config(data, legacy_key)
+    current = table_config(data, key)
+    return {**legacy, **current}
+
+
 def strip_toml_comment(line: str) -> str:
     in_string = False
     escaped = False
@@ -333,18 +346,10 @@ def load_config(path: Path | None) -> AppConfig:
     if not isinstance(data, dict):
         raise ValueError("config root must be a table/object")
 
-    storage_data = data.get("storage", {})
-    server_data = data.get("server", {})
-    central_data = data.get("central_server", {})
-    redaction_data = data.get("redaction", {})
-    if not isinstance(storage_data, dict):
-        raise ValueError("storage must be a table/object")
-    if not isinstance(server_data, dict):
-        raise ValueError("server must be a table/object")
-    if not isinstance(central_data, dict):
-        raise ValueError("central_server must be a table/object")
-    if not isinstance(redaction_data, dict):
-        raise ValueError("redaction must be a table/object")
+    storage_data = table_config(data, "storage")
+    collector_data = merged_table_config(data, "server", "collector")
+    aggregation_data = merged_table_config(data, "central_server", "aggregation_server")
+    redaction_data = table_config(data, "redaction")
 
     extracted_attributes = storage_data.get("extracted_attributes", "redacted")
     if extracted_attributes not in ("redacted", "full", "none"):
@@ -359,16 +364,16 @@ def load_config(path: Path | None) -> AppConfig:
         max_body_bytes=int_config(storage_data, "max_body_bytes", DEFAULT_MAX_BODY_BYTES),
     )
     remote_server = RemoteServerConfig(
-        endpoint=optional_str_config(server_data, "endpoint"),
-        api_key=optional_str_config(server_data, "api_key"),
-        batch_size=int_config(server_data, "batch_size", 100),
-        timeout_seconds=int_config(server_data, "timeout_seconds", 10),
+        endpoint=optional_str_config(collector_data, "endpoint"),
+        api_key=optional_str_config(collector_data, "api_key"),
+        batch_size=int_config(collector_data, "batch_size", 100),
+        timeout_seconds=int_config(collector_data, "timeout_seconds", 10),
     )
     central = ServerConfig(
-        admin_api_key=optional_str_config(central_data, "admin_api_key"),
-        host=str_config(central_data, "host", "127.0.0.1"),
-        port=int_config(central_data, "port", 8318),
-        db=str_config(central_data, "db", str(DEFAULT_SERVER_DB)),
+        admin_api_key=optional_str_config(aggregation_data, "admin_api_key"),
+        host=str_config(aggregation_data, "host", "127.0.0.1"),
+        port=int_config(aggregation_data, "port", 8318),
+        db=str_config(aggregation_data, "db", str(DEFAULT_SERVER_DB)),
     )
     return AppConfig(
         client_name=str_config(data, "client_name", "local"),
@@ -2313,7 +2318,7 @@ def tool_event_to_payload(row: sqlite3.Row) -> dict[str, Any]:
 
 def sync_server_key(config: AppConfig) -> str:
     if not config.server.endpoint or not config.server.api_key:
-        raise ValueError("server.endpoint and server.api_key are required for sync")
+        raise ValueError("collector.endpoint and collector.api_key are required for sync")
     material = "\n".join(
         (
             config.client_name,
@@ -2362,7 +2367,7 @@ def post_usage_batch(
     tool_rows: Sequence[sqlite3.Row] = (),
 ) -> dict[str, Any]:
     if not config.server.endpoint or not config.server.api_key:
-        raise ValueError("server.endpoint and server.api_key are required for sync")
+        raise ValueError("collector.endpoint and collector.api_key are required for sync")
     url = config.server.endpoint.rstrip("/") + "/api/v1/usage-events"
     payload = {
         "client_name": config.client_name,
@@ -3028,7 +3033,9 @@ def main() -> int:
     p_samples.add_argument("--limit", type=int, default=10)
     p_samples.set_defaults(func=samples)
 
-    p_sync = sub.add_parser("sync", parents=[db_parent], help="Forward queued client usage events to the central server")
+    p_sync = sub.add_parser(
+        "sync", parents=[db_parent], help="Forward queued client usage events to the aggregation server"
+    )
     p_sync.add_argument("--limit", type=int)
     p_sync.set_defaults(func=sync)
 
@@ -3045,7 +3052,7 @@ def main() -> int:
     p_client_sync.add_argument("--limit", type=int)
     p_client_sync.set_defaults(func=sync)
 
-    p_server = sub.add_parser("server", help="Central server commands")
+    p_server = sub.add_parser("server", help="Aggregation server commands")
     server_sub = p_server.add_subparsers(dest="server_cmd", required=True)
     p_server_serve = server_sub.add_parser("serve", parents=[db_parent])
     p_server_serve.add_argument("--host")

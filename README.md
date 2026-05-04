@@ -2,13 +2,14 @@
 
 This is a local and multi-machine observability setup for Codex usage. The
 client runs a local OTLP/HTTP receiver, stores extracted usage rows in SQLite,
-and can forward compact usage events to a central server. The server aggregates
-usage across machines and includes a simple LAN-only admin UI for client tokens.
+and can forward compact usage events to an aggregation server. The aggregation
+server collects usage across machines and includes a simple LAN-only admin UI
+for client tokens.
 
 ## Repository layout
 
 - `codex_usage_tracker/collector/`: local OTLP receiver/collector surface,
-  including local persistence and forwarding to a server.
+  including local persistence and forwarding to an aggregation server.
 - `codex_usage_tracker/aggregation_server/`: central aggregation server surface,
   including client tokens, ingestion APIs, and web reports.
 - `codex_usage_tracker/core.py`: shared implementation used by both components
@@ -85,8 +86,8 @@ python3 codex_usage_observer.py --config codex_usage_observer.toml serve --port 
 Start from `codex_usage_observer.example.toml`. The main storage choices are:
 
 - `client_name`: names this machine/client for later aggregation.
-- `[server]`: optional central server endpoint and client API key.
-- `[central_server]`: bind address and database for the central server.
+- `[collector]`: optional aggregation-server endpoint and client API key.
+- `[aggregation_server]`: bind address and database for the aggregation server.
 - `raw_payload_body`: store full raw OTEL payload bodies, or keep only metadata.
 - `extracted_attributes`: store extracted attributes as `redacted`, `full`, or `none`.
 - `model`, `session_id`, `thread_id`: choose whether these dimensions are stored on usage rows.
@@ -184,9 +185,9 @@ The receiver also stores non-JSON payloads raw, but token extraction needs JSON.
 Codex batches telemetry asynchronously, so start a fresh Codex session after
 changing this config and check the observer again after the session has ended.
 
-## Central server
+## Aggregation Server
 
-Start the central server:
+Start the aggregation server:
 
 ```bash
 python3 codex_usage_observer.py --config codex_usage_observer.toml server serve
@@ -198,12 +199,12 @@ LAN; the MVP admin UI has no login and relies on network placement.
 Open `/admin` in a browser to create, rename, and revoke client tokens. New
 tokens are shown once. Only token hashes are stored in the server SQLite DB.
 
-Configure each client with the generated token:
+Configure each collector with the generated token:
 
 ```toml
 client_name = "work-laptop"
 
-[server]
+[collector]
 endpoint = "http://server-host:8318"
 api_key = "ait_generated_token_from_admin_ui"
 batch_size = 100
@@ -211,9 +212,10 @@ timeout_seconds = 10
 ```
 
 The client keeps local reports and queues unsynced rows. It tracks the server
-target it last synced each event to. If `client_name`, `[server].endpoint`, or
-`[server].api_key` changes, historical usage becomes pending for that new target
-and is sent on receiver startup or the next manual sync. Run a manual retry with:
+target it last synced each event to. If `client_name`, `[collector].endpoint`,
+or `[collector].api_key` changes, historical usage becomes pending for that new
+target and is sent on receiver startup or the next manual sync. Run a manual
+retry with:
 
 ```bash
 python3 codex_usage_observer.py client sync
@@ -224,11 +226,15 @@ Open `/reports` in a browser to view token totals grouped by client and model by
 default, with filters for date, client, model, session, grouping, and row limit.
 Open `/tools` to view Codex tool calls grouped by client and tool. Report APIs
 are available at `GET /api/v1/reports/usage`, `GET /api/v1/reports/tools`, and
-`GET /api/v1/stats` using `Authorization: Bearer <central_server.admin_api_key>`.
+`GET /api/v1/stats` using `Authorization: Bearer <aggregation_server.admin_api_key>`.
 
-### Run the central server with Docker
+Older configs using `[server]` for collector forwarding and `[central_server]`
+for aggregation-server settings are still accepted. Prefer `[collector]` and
+`[aggregation_server]` for new configs.
 
-The repository includes a Docker setup for the central server component. It
+### Run the aggregation server with Docker
+
+The repository includes a Docker setup for the aggregation server component. It
 binds the container service to `127.0.0.1:8318` on the host and stores the
 server SQLite database under `./data/server`.
 

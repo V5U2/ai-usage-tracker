@@ -2,7 +2,7 @@
 
 The collector component is the local OTLP receiver. It accepts Codex telemetry,
 stores raw payloads and extracted usage events in a local SQLite database, and
-forwards compact usage events to an aggregation server when `[server]` is
+forwards compact usage events to an aggregation server when `[collector]` is
 configured.
 
 Primary runtime command:
