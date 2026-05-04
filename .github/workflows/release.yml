@@ -39,8 +39,36 @@ jobs:
           fi
 
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          collector_archive="ai-usage-tracker-collector-${tag}.tar.gz"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "collector_archive=${collector_archive}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build collector release tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.vars.outputs.tag }}"
+          package_dir="dist/ai-usage-tracker-collector-${tag}"
+
+          rm -rf dist
+          mkdir -p "${package_dir}"
+          cp codex_usage_observer.py "${package_dir}/"
+          cp codex_usage_observer.example.toml "${package_dir}/"
+          cp README.md "${package_dir}/"
+          cp -R codex_usage_tracker "${package_dir}/codex_usage_tracker"
+          mkdir -p "${package_dir}/deploy"
+          cp -R deploy/collector "${package_dir}/deploy/collector"
+          cp deploy/README.md "${package_dir}/deploy/README.md"
+
+          tar -C dist -czf "dist/${{ steps.vars.outputs.collector_archive }}" "ai-usage-tracker-collector-${tag}"
+
+      - name: Upload collector workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vars.outputs.collector_archive }}
+          path: dist/${{ steps.vars.outputs.collector_archive }}
+          if-no-files-found: error
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -78,3 +106,4 @@ jobs:
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
+          files: dist/${{ steps.vars.outputs.collector_archive }}

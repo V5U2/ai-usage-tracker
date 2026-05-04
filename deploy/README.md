@@ -47,6 +47,13 @@ CLIENT_NAME="$(hostname)" \
 deploy/collector/install-linux-systemd.sh
 ```
 
+For a Cloudflare Access-protected endpoint, add:
+
+```bash
+CF_ACCESS_CLIENT_ID=your.cloudflare.access.client.id \
+CF_ACCESS_CLIENT_SECRET=your.cloudflare.access.client.secret
+```
+
 `AGGREGATION_ENDPOINT` and `COLLECTOR_API_KEY` are required so a rerun cannot
 accidentally overwrite a forwarding config with a local-only collector.
 
@@ -63,6 +70,22 @@ Useful checks:
 systemctl --user status codex-usage-collector.service --no-pager
 journalctl --user -u codex-usage-collector.service -f
 ss -ltnp | grep ':4318'
+python3 ~/.local/share/ai-usage-tracker/codex_usage_observer.py \
+  --config ~/.local/share/ai-usage-tracker/codex_usage_observer.toml \
+  --db ~/.local/share/ai-usage-tracker/codex_usage.sqlite \
+  client sync-status
+```
+
+Update an already-installed Linux or WSL collector without changing its config:
+
+```bash
+deploy/collector/update-linux-systemd.sh
+```
+
+Update one or more SSH-reachable Linux collectors from this checkout:
+
+```bash
+deploy/collector/update-remote-linux-systemd.sh linux-host other-host
 ```
 
 ## macOS Collector
@@ -74,6 +97,13 @@ AGGREGATION_ENDPOINT=http://UNRAID_HOST_OR_IP:18418 \
 COLLECTOR_API_KEY=ait_generated_token_from_admin_ui \
 CLIENT_NAME="$(scutil --get LocalHostName 2>/dev/null || hostname)" \
 deploy/collector/install-macos-launchd.sh
+```
+
+For a Cloudflare Access-protected endpoint, add:
+
+```bash
+CF_ACCESS_CLIENT_ID=your.cloudflare.access.client.id \
+CF_ACCESS_CLIENT_SECRET=your.cloudflare.access.client.secret
 ```
 
 `AGGREGATION_ENDPOINT` and `COLLECTOR_API_KEY` are required so a rerun cannot
@@ -94,6 +124,56 @@ launchctl print "gui/$(id -u)/com.$USER.ai-usage-tracker.collector"
 lsof -iTCP:4318 -sTCP:LISTEN -n -P
 tail -f "$HOME/Library/Logs/ai-usage-tracker/collector.err.log"
 ```
+
+Update an already-installed macOS collector without changing its config:
+
+```bash
+deploy/collector/update-macos-launchd.sh
+```
+
+If the LaunchAgent label or Python path differs from the defaults, pass them:
+
+```bash
+LABEL=com.example.ai-usage-tracker.receiver \
+PYTHON_BIN=/opt/homebrew/bin/python3.13 \
+deploy/collector/update-macos-launchd.sh
+```
+
+## Collector Packaging Roadmap
+
+The release workflow publishes a collector tarball named
+`ai-usage-tracker-collector-<tag>.tar.gz` alongside the server container image.
+It contains:
+
+- `codex_usage_observer.py`
+- `codex_usage_tracker/`
+- `codex_usage_observer.example.toml`
+- `deploy/collector/`
+- `README.md` and `deploy/README.md`
+
+To update a collector from an unpacked release tarball, run the matching update
+script from the extracted directory. The update scripts preserve the existing
+collector config and credentials:
+
+```bash
+# Linux or WSL
+deploy/collector/update-linux-systemd.sh
+
+# macOS
+deploy/collector/update-macos-launchd.sh
+```
+
+The current collector deployment model is still source-copy based: install
+scripts create config and services, while update scripts copy code over the
+existing install and preserve credentials. Future packaging can make this
+cleaner:
+
+- Add a small `ai-usage-collector` console entry point via Python packaging so
+  installs can use `pipx install ai-usage-tracker` or `uv tool install`.
+- For managed fleets, publish OS-native packages later: Homebrew formula for
+  macOS and a `.deb`/`.rpm` or systemd-user tarball for Linux.
+- Keep config outside the package-owned code directory so upgrades never rewrite
+  API keys or Cloudflare Access service-token credentials.
 
 ## Codex OTEL Config
 

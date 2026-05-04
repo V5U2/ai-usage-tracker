@@ -183,6 +183,8 @@ client_name = "work-laptop"
 [collector]
 endpoint = "http://usage-server:18418"
 api_key = "ait_test"
+cloudflare_access_client_id = "cf-client-id"
+cloudflare_access_client_secret = "cf-client-secret"
 batch_size = 23
 timeout_seconds = 7
 
@@ -199,6 +201,8 @@ admin_api_key = "admin"
 
             self.assertEqual(config.server.endpoint, "http://usage-server:18418")
             self.assertEqual(config.server.api_key, "ait_test")
+            self.assertEqual(config.server.cloudflare_access_client_id, "cf-client-id")
+            self.assertEqual(config.server.cloudflare_access_client_secret, "cf-client-secret")
             self.assertEqual(config.server.batch_size, 23)
             self.assertEqual(config.server.timeout_seconds, 7)
             self.assertEqual(config.central.host, "0.0.0.0")
@@ -613,6 +617,37 @@ class ClientSyncTests(unittest.TestCase):
             self.assertIn("offline", row["last_sync_error"])
             con.close()
 
+    def test_sync_status_counts_current_target_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "usage.sqlite"
+            con = app.connect(db)
+            self.insert_sync_event(con)
+            self.insert_sync_event(con)
+            first = app.AppConfig(server=app.RemoteServerConfig(endpoint="http://server-a", api_key="secret-a"))
+            second = app.AppConfig(server=app.RemoteServerConfig(endpoint="http://server-b", api_key="secret-b"))
+
+            first_key = app.sync_server_key(first)
+            second_key = app.sync_server_key(second)
+            con.execute(
+                "update usage_events set synced_at = ?, synced_server_key = ? where id = 1",
+                ("2026-05-04T01:03:00+00:00", first_key),
+            )
+            con.execute(
+                "update usage_events set synced_at = ?, synced_server_key = ? where id = 2",
+                ("2026-05-04T01:04:00+00:00", second_key),
+            )
+
+            rows = app.sync_status_rows(con, second)
+            usage = next(row for row in rows if row["table_name"] == "usage_events")
+            tools = next(row for row in rows if row["table_name"] == "tool_events")
+
+            self.assertEqual(usage["total_rows"], 2)
+            self.assertEqual(usage["synced_rows"], 1)
+            self.assertEqual(usage["pending_rows"], 1)
+            self.assertEqual(usage["last_synced_at"], "2026-05-04T01:04:00+00:00")
+            self.assertEqual(tools["total_rows"], 0)
+            con.close()
+
     def test_sync_marks_tool_rows_synced(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "usage.sqlite"
@@ -682,6 +717,119 @@ class ClientSyncTests(unittest.TestCase):
             self.assertIsNotNone(tool_row["synced_at"])
             self.assertEqual(tool_row["synced_server_key"], app.sync_server_key(handler.app_config))
             self.assertEqual(post.call_count, 1)
+
+    def test_receiver_event_driven_sync_uses_configured_batch_size(self):
+        payload = log_payload(
+            {
+                "event.name": "response.completed",
+                "model": "gpt-test",
+                "input_tokens": 1,
+                "output_tokens": 1,
+            }
+        )
+        body = json.dumps(payload).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "usage.sqlite"
+            con = app.connect(db)
+            for _ in range(4):
+                self.insert_sync_event(con)
+            con.commit()
+            con.close()
+
+            handler = object.__new__(app.Receiver)
+            handler.db_path = db
+            handler.app_config = app.AppConfig(
+                server=app.RemoteServerConfig(endpoint="http://server", api_key="secret", batch_size=5)
+            )
+            handler.path = "/v1/logs"
+            handler.headers = {"content-length": str(len(body)), "content-type": "application/json"}
+            handler.rfile = io.BytesIO(body)
+            handler.wfile = io.BytesIO()
+            responses = []
+            handler.send_response = responses.append
+            handler.send_header = lambda _key, _value: None
+            handler.end_headers = lambda: None
+
+            with patch.object(
+                core,
+                "post_usage_batch",
+                return_value={"accepted": 5, "duplicates": 0, "accepted_tool_events": 0, "duplicate_tool_events": 0},
+            ) as post:
+                handler.do_POST()
+
+            synced_rows = post.call_args.args[1]
+            con = app.connect(db)
+            pending = app.pending_sync_rows(con, handler.app_config, 10)
+            con.close()
+
+            self.assertEqual(responses, [200])
+            self.assertEqual(len(synced_rows), 5)
+            self.assertEqual(pending, [])
+
+    def test_post_usage_batch_sends_cloudflare_access_headers_when_configured(self):
+        config = app.AppConfig(
+            server=app.RemoteServerConfig(
+                endpoint="https://usage.example.com",
+                api_key="ait_test",
+                cloudflare_access_client_id="cf-client-id",
+                cloudflare_access_client_secret="cf-client-secret",
+            )
+        )
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"accepted": 0, "duplicates": 0}'
+
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            captured["timeout"] = timeout
+            captured["headers"] = dict(req.header_items())
+            return FakeResponse()
+
+        with patch.object(core.request, "urlopen", side_effect=fake_urlopen):
+            result = app.post_usage_batch(config, [])
+
+        self.assertEqual(result, {"accepted": 0, "duplicates": 0})
+        self.assertEqual(captured["url"], "https://usage.example.com/api/v1/usage-events")
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer ait_test")
+        self.assertEqual(captured["headers"]["User-agent"], "ai-usage-tracker-collector/0.1")
+        self.assertEqual(captured["headers"]["Cf-access-client-id"], "cf-client-id")
+        self.assertEqual(captured["headers"]["Cf-access-client-secret"], "cf-client-secret")
+
+    def test_post_usage_batch_omits_cloudflare_access_headers_by_default(self):
+        config = app.AppConfig(
+            server=app.RemoteServerConfig(endpoint="https://usage.example.com", api_key="ait_test")
+        )
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"accepted": 0, "duplicates": 0}'
+
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["headers"] = dict(req.header_items())
+            return FakeResponse()
+
+        with patch.object(core.request, "urlopen", side_effect=fake_urlopen):
+            app.post_usage_batch(config, [])
+
+        self.assertNotIn("Cf-access-client-id", captured["headers"])
+        self.assertNotIn("Cf-access-client-secret", captured["headers"])
 
 
 class ServerHttpTests(unittest.TestCase):

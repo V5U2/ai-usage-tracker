@@ -5,6 +5,10 @@ client_name = "local"
 # for local-only collection.
 # endpoint = "http://127.0.0.1:8318"
 # api_key = "ait_generated_token_from_admin_ui"
+# Optional Cloudflare Access service-token headers for collectors sending to an
+# aggregator protected by Cloudflare Access.
+# cloudflare_access_client_id = "your.cloudflare.access.client.id"
+# cloudflare_access_client_secret = "your.cloudflare.access.client.secret"
 batch_size = 100
 timeout_seconds = 10
 

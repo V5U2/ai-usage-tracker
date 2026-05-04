@@ -13,6 +13,8 @@ COLLECTOR_PORT=${COLLECTOR_PORT:-4318}
 COLLECTOR_HOST=${COLLECTOR_HOST:-127.0.0.1}
 AGGREGATION_ENDPOINT=${AGGREGATION_ENDPOINT:-}
 COLLECTOR_API_KEY=${COLLECTOR_API_KEY:-}
+CF_ACCESS_CLIENT_ID=${CF_ACCESS_CLIENT_ID:-}
+CF_ACCESS_CLIENT_SECRET=${CF_ACCESS_CLIENT_SECRET:-}
 PYTHON_BIN=${PYTHON_BIN:-/usr/bin/python3}
 
 if [ -z "$AGGREGATION_ENDPOINT" ] || [ -z "$COLLECTOR_API_KEY" ]; then
@@ -37,6 +39,12 @@ EOF
   fi
   if [ -n "$COLLECTOR_API_KEY" ]; then
     printf 'api_key = "%s"\n' "$COLLECTOR_API_KEY"
+  fi
+  if [ -n "$CF_ACCESS_CLIENT_ID" ]; then
+    printf 'cloudflare_access_client_id = "%s"\n' "$CF_ACCESS_CLIENT_ID"
+  fi
+  if [ -n "$CF_ACCESS_CLIENT_SECRET" ]; then
+    printf 'cloudflare_access_client_secret = "%s"\n' "$CF_ACCESS_CLIENT_SECRET"
   fi
   cat <<EOF
 batch_size = 100

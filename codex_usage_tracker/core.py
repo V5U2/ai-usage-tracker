@@ -145,6 +145,14 @@ DISPLAY_NAMES = {
     "source_received_at": "time",
     "first_seen": "first",
     "last_seen": "last",
+    "table_name": "table",
+    "total_rows": "total",
+    "synced_rows": "synced",
+    "pending_rows": "pending",
+    "error_rows": "errors",
+    "newest_local": "newest_local",
+    "newest_synced": "newest_synced",
+    "last_synced_at": "last_sync",
 }
 NUMERIC_COLUMNS = {
     "events",
@@ -159,8 +167,12 @@ NUMERIC_COLUMNS = {
     "total_tokens",
     "cached_tokens",
     "reasoning_tokens",
+    "total_rows",
+    "synced_rows",
+    "pending_rows",
+    "error_rows",
 }
-TIME_COLUMNS = {"first_seen", "last_seen", "source_received_at"}
+TIME_COLUMNS = {"first_seen", "last_seen", "source_received_at", "newest_local", "newest_synced", "last_synced_at"}
 TOOL_EVENT_NAMES = {"codex.tool_decision", "codex.tool_result"}
 VERBOSE_TOOL_ATTRS = {"arguments", "output"}
 
@@ -179,6 +191,8 @@ class StorageConfig:
 class RemoteServerConfig:
     endpoint: str | None = None
     api_key: str | None = None
+    cloudflare_access_client_id: str | None = None
+    cloudflare_access_client_secret: str | None = None
     batch_size: int = 100
     timeout_seconds: int = 10
 
@@ -366,6 +380,8 @@ def load_config(path: Path | None) -> AppConfig:
     remote_server = RemoteServerConfig(
         endpoint=optional_str_config(collector_data, "endpoint"),
         api_key=optional_str_config(collector_data, "api_key"),
+        cloudflare_access_client_id=optional_str_config(collector_data, "cloudflare_access_client_id"),
+        cloudflare_access_client_secret=optional_str_config(collector_data, "cloudflare_access_client_secret"),
         batch_size=int_config(collector_data, "batch_size", 100),
         timeout_seconds=int_config(collector_data, "timeout_seconds", 10),
     )
@@ -1478,8 +1494,7 @@ class Receiver(BaseHTTPRequestHandler):
             insert_tool_events(con, raw_id, received_at, tool_events)
             con.commit()
             if (events or tool_events) and self.app_config.server.endpoint and self.app_config.server.api_key:
-                sync_limit = max(len(events), len(tool_events))
-                _, _, sync_error = sync_pending_usage(con, self.app_config, limit=sync_limit)
+                _, _, sync_error = sync_pending_usage(con, self.app_config, limit=self.app_config.server.batch_size)
                 con.commit()
                 if sync_error:
                     sys.stderr.write(f"sync error for {self.path}: {sync_error}\n")
@@ -2376,13 +2391,18 @@ def post_usage_batch(
         "events": [usage_event_to_payload(row) for row in rows],
         "tool_events": [tool_event_to_payload(row) for row in tool_rows],
     }
+    headers = {
+        "authorization": f"Bearer {config.server.api_key}",
+        "content-type": "application/json",
+        "user-agent": "ai-usage-tracker-collector/0.1",
+    }
+    if config.server.cloudflare_access_client_id and config.server.cloudflare_access_client_secret:
+        headers["CF-Access-Client-Id"] = config.server.cloudflare_access_client_id
+        headers["CF-Access-Client-Secret"] = config.server.cloudflare_access_client_secret
     req = request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "authorization": f"Bearer {config.server.api_key}",
-            "content-type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
     with request.urlopen(req, timeout=config.server.timeout_seconds) as response:
@@ -2495,6 +2515,75 @@ def sync(args: argparse.Namespace) -> None:
         print(f"Sync failed for {attempted} events: {error}", file=sys.stderr)
         raise SystemExit(1)
     print(f"Synced {synced} events.")
+
+
+def sync_status_rows(con: sqlite3.Connection, config: AppConfig) -> list[dict[str, Any]]:
+    target_key = sync_server_key(config)
+    rows: list[dict[str, Any]] = []
+    for table_name in ("usage_events", "tool_events"):
+        row = con.execute(
+            f"""
+            select
+                count(*) as total_rows,
+                coalesce(sum(case when synced_server_key = ? then 1 else 0 end), 0) as synced_rows,
+                coalesce(sum(case when synced_server_key is null or synced_server_key != ? then 1 else 0 end), 0) as pending_rows,
+                coalesce(sum(case when (synced_server_key is null or synced_server_key != ?) and last_sync_error is not null then 1 else 0 end), 0) as error_rows,
+                max(received_at) as newest_local,
+                max(case when synced_server_key = ? then received_at else null end) as newest_synced,
+                max(case when synced_server_key = ? then synced_at else null end) as last_synced_at
+            from {table_name}
+            """,
+            (target_key, target_key, target_key, target_key, target_key),
+        ).fetchone()
+        rows.append({"table_name": table_name, **dict(row)})
+    return rows
+
+
+def sync_status(args: argparse.Namespace) -> None:
+    config = load_config(Path(args.config))
+    con = connect(Path(args.db))
+    try:
+        rows = sync_status_rows(con, config)
+        if args.format == "json":
+            print(json.dumps(rows, indent=2))
+        else:
+            print(f"endpoint: {config.server.endpoint or '(not configured)'}")
+            print(f"server_key: {sync_server_key(config)[:12]}")
+            print_table(
+                rows,
+                (
+                    "table_name",
+                    "total_rows",
+                    "synced_rows",
+                    "pending_rows",
+                    "error_rows",
+                    "newest_local",
+                    "newest_synced",
+                    "last_synced_at",
+                ),
+            )
+        if args.errors:
+            error_rows = con.execute(
+                """
+                select 'usage_events' as table_name, last_sync_error, count(*) as events, max(received_at) as last_seen
+                from usage_events
+                where (synced_server_key is null or synced_server_key != ?) and last_sync_error is not null
+                group by last_sync_error
+                union all
+                select 'tool_events' as table_name, last_sync_error, count(*) as events, max(received_at) as last_seen
+                from tool_events
+                where (synced_server_key is null or synced_server_key != ?) and last_sync_error is not null
+                group by last_sync_error
+                order by events desc
+                limit ?
+                """,
+                (sync_server_key(config), sync_server_key(config), args.errors),
+            ).fetchall()
+            if error_rows:
+                print()
+                print_table(error_rows, ("table_name", "events", "last_seen", "last_sync_error"))
+    finally:
+        con.close()
 
 
 def hash_token(token: str) -> str:
@@ -3040,6 +3129,11 @@ def main() -> int:
     p_sync.add_argument("--limit", type=int)
     p_sync.set_defaults(func=sync)
 
+    p_sync_status = sub.add_parser("sync-status", parents=[db_parent], help="Show collector sync progress")
+    p_sync_status.add_argument("--format", choices=("table", "json"), default="table")
+    p_sync_status.add_argument("--errors", type=int, default=0, help="Show this many pending sync error groups")
+    p_sync_status.set_defaults(func=sync_status)
+
     p_client = sub.add_parser("client", help="Client-side commands")
     client_sub = p_client.add_subparsers(dest="client_cmd", required=True)
 
@@ -3052,6 +3146,11 @@ def main() -> int:
     p_client_sync = client_sub.add_parser("sync", parents=[db_parent])
     p_client_sync.add_argument("--limit", type=int)
     p_client_sync.set_defaults(func=sync)
+
+    p_client_sync_status = client_sub.add_parser("sync-status", parents=[db_parent])
+    p_client_sync_status.add_argument("--format", choices=("table", "json"), default="table")
+    p_client_sync_status.add_argument("--errors", type=int, default=0, help="Show this many pending sync error groups")
+    p_client_sync_status.set_defaults(func=sync_status)
 
     p_server = sub.add_parser("server", help="Aggregation server commands")
     server_sub = p_server.add_subparsers(dest="server_cmd", required=True)
