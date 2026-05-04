@@ -172,6 +172,89 @@ class ExtractionTests(unittest.TestCase):
 
             self.assertEqual(config.client_name, "work-laptop")
 
+    def test_load_config_uses_clear_component_sections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+client_name = "work-laptop"
+
+[collector]
+endpoint = "http://usage-server:18418"
+api_key = "ait_test"
+batch_size = 23
+timeout_seconds = 7
+
+[aggregation_server]
+host = "0.0.0.0"
+port = 18418
+db = "aggregation.sqlite"
+admin_api_key = "admin"
+""",
+                encoding="utf-8",
+            )
+
+            config = app.load_config(config_path)
+
+            self.assertEqual(config.server.endpoint, "http://usage-server:18418")
+            self.assertEqual(config.server.api_key, "ait_test")
+            self.assertEqual(config.server.batch_size, 23)
+            self.assertEqual(config.server.timeout_seconds, 7)
+            self.assertEqual(config.central.host, "0.0.0.0")
+            self.assertEqual(config.central.port, 18418)
+            self.assertEqual(config.central.db, "aggregation.sqlite")
+            self.assertEqual(config.central.admin_api_key, "admin")
+
+    def test_load_config_keeps_legacy_server_section_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[server]
+endpoint = "http://legacy-server:8318"
+api_key = "legacy-client-token"
+
+[central_server]
+host = "0.0.0.0"
+port = 8318
+db = "legacy-server.sqlite"
+""",
+                encoding="utf-8",
+            )
+
+            config = app.load_config(config_path)
+
+            self.assertEqual(config.server.endpoint, "http://legacy-server:8318")
+            self.assertEqual(config.server.api_key, "legacy-client-token")
+            self.assertEqual(config.central.host, "0.0.0.0")
+            self.assertEqual(config.central.port, 8318)
+            self.assertEqual(config.central.db, "legacy-server.sqlite")
+
+    def test_load_config_clear_sections_override_legacy_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[server]
+endpoint = "http://legacy-server:8318"
+
+[collector]
+endpoint = "http://usage-server:18418"
+
+[central_server]
+port = 8318
+
+[aggregation_server]
+port = 18418
+""",
+                encoding="utf-8",
+            )
+
+            config = app.load_config(config_path)
+
+            self.assertEqual(config.server.endpoint, "http://usage-server:18418")
+            self.assertEqual(config.central.port, 18418)
+
     def test_serve_payload_log_line_includes_ingestion_details(self):
         line = app.serve_payload_log_line(
             path="/v1/logs",

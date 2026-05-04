@@ -25,10 +25,10 @@ https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/unraid/ai-usage-tra
 ```
 
 After the container starts, create collector client tokens at `/admin`, then
-configure each collector's `[server]` endpoint to point at the Unraid host:
+configure each collector's `[collector]` endpoint to point at the Unraid host:
 
 ```toml
-[server]
+[collector]
 endpoint = "http://UNRAID_HOST_OR_IP:18418"
 api_key = "ait_generated_token_from_admin_ui"
 batch_size = 100

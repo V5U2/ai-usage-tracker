@@ -1,10 +1,6 @@
 client_name = "docker-server"
 
-[server]
-batch_size = 100
-timeout_seconds = 10
-
-[central_server]
+[aggregation_server]
 host = "0.0.0.0"
 port = 8318
 db = "/data/codex_usage_server.sqlite"
