@@ -7,8 +7,9 @@ It runs the published GHCR image and persists the server SQLite database under
 Defaults:
 
 - Repository: `ghcr.io/v5u2/ai-usage-tracker:latest`
-- Web UI: `http://<unraid-ip>:8318/reports`
-- Admin UI: `http://<unraid-ip>:8318/admin`
+- Web UI: `http://<unraid-ip>:18418/reports`
+- Admin UI: `http://<unraid-ip>:18418/admin`
+- Host port: `18418/tcp`
 - Container port: `8318/tcp`
 - App data: `/mnt/user/appdata/ai-usage-tracker` mapped to `/data`
 
@@ -28,7 +29,7 @@ configure each collector's `[server]` endpoint to point at the Unraid host:
 
 ```toml
 [server]
-endpoint = "http://UNRAID_HOST_OR_IP:8318"
+endpoint = "http://UNRAID_HOST_OR_IP:18418"
 api_key = "ait_generated_token_from_admin_ui"
 batch_size = 100
 timeout_seconds = 10

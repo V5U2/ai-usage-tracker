@@ -293,8 +293,9 @@ unless that release action is intended.
 ### Unraid deployment
 
 An Unraid Docker template is available at `unraid/ai-usage-tracker.xml`. It
-deploys the aggregation server from GHCR, maps port `8318`, and persists server
-SQLite data at `/mnt/user/appdata/ai-usage-tracker`.
+deploys the aggregation server from GHCR, maps host port `18418` to the
+container's `8318/tcp`, and persists server SQLite data at
+`/mnt/user/appdata/ai-usage-tracker`.
 
 Copy the template to the Unraid host:
 
@@ -309,8 +310,8 @@ branch:
 https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/unraid/ai-usage-tracker.xml
 ```
 
-After starting the container, open `http://<unraid-ip>:8318/admin` to create
-collector tokens and `http://<unraid-ip>:8318/reports` to view usage reports.
+After starting the container, open `http://<unraid-ip>:18418/admin` to create
+collector tokens and `http://<unraid-ip>:18418/reports` to view usage reports.
 
 ## 3. Check token totals
 
