@@ -788,16 +788,16 @@ def optional_int_attr(attrs: dict[str, Any], aliases: tuple[str, ...]) -> int | 
     return None
 
 
-def float_attr(attrs: dict[str, Any], aliases: tuple[str, ...]) -> float:
+def float_attr(attrs: dict[str, Any], aliases: tuple[str, ...]) -> tuple[float, str | None]:
     for alias in aliases:
         value = attrs.get(alias)
         if value in (None, ""):
             continue
         try:
-            return float(value)
+            return float(value), alias
         except (TypeError, ValueError):
             continue
-    return 0.0
+    return 0.0, None
 
 
 def first_attr(attrs: dict[str, Any], aliases: tuple[str, ...]) -> str | None:
@@ -880,16 +880,16 @@ def usage_from_attrs(
     total_tokens = int_attr(attrs, TOKEN_KEYS["total"])
     cached_tokens = int_attr(attrs, TOKEN_KEYS["cached"])
     reasoning_tokens = int_attr(attrs, TOKEN_KEYS["reasoning"])
-    cost_value = float_attr(
+    cost_value, cost_alias = float_attr(
         attrs,
         (
+            "gen_ai.usage.cost_usd",
+            "usage.cost_usd",
             "cost",
             "usage.cost",
             "gen_ai.usage.cost",
-            "gen_ai.usage.cost_usd",
             "openrouter.cost",
             "openrouter.credits",
-            "usage.cost_usd",
         ),
     )
     cost_unit = first_attr(
@@ -897,7 +897,7 @@ def usage_from_attrs(
         ("cost_unit", "cost.currency", "gen_ai.usage.cost_unit", "gen_ai.usage.cost_currency", "openrouter.cost_unit"),
     )
     if cost_value and not cost_unit:
-        if any(attrs.get(alias) not in (None, "") for alias in ("gen_ai.usage.cost_usd", "usage.cost_usd")):
+        if cost_alias in ("gen_ai.usage.cost_usd", "usage.cost_usd"):
             cost_unit = "USD"
         else:
             cost_unit = "credits"

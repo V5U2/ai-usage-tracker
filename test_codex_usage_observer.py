@@ -120,6 +120,22 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(events[0]["cached_tokens"], 2)
         self.assertEqual(events[0]["total_tokens"], 8)
 
+    def test_cost_unit_matches_selected_cost_alias(self):
+        event = app.usage_from_attrs(
+            "traces",
+            "chat",
+            {
+                "gen_ai.usage.input_tokens": 1,
+                "gen_ai.usage.output_tokens": 1,
+                "cost": "99",
+                "gen_ai.usage.cost_usd": "0.25",
+            },
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event["cost_value"], 0.25)
+        self.assertEqual(event["cost_unit"], "USD")
+
     def test_redacts_account_metadata_but_keeps_token_counts(self):
         payload = log_payload(
             {
