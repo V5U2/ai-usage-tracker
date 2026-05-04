@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/V5U2/ai-usage-tracker/issues</Support>
   <Project>https://github.com/V5U2/ai-usage-tracker</Project>
-  <Overview>Central aggregation server for Codex AI usage telemetry. Collectors forward compact usage events to this server, which stores them in SQLite and exposes token reports plus client-token administration.</Overview>
+  <Overview>Central aggregation server for Codex AI usage telemetry. Collectors forward compact usage events to this server, and OpenRouter Broadcast can send OTLP traces to /v1/traces when enabled. The server stores usage in SQLite and exposes token reports plus client-token administration.</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8318]/reports</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/unraid/ai-usage-tracker.xml</TemplateURL>
@@ -21,6 +21,6 @@
   <DonateText/>
   <DonateLink/>
   <Requires/>
-  <Config Name="Web UI / API Port" Target="8318" Default="18418" Mode="tcp" Description="Host port for the aggregation server web UI, admin UI, reports, and ingestion API. The container listens on 8318/tcp." Type="Port" Display="always" Required="true" Mask="false">18418</Config>
+  <Config Name="Web UI / API Port" Target="8318" Default="18418" Mode="tcp" Description="Host port for the aggregation server web UI, admin UI, reports, collector ingestion API, and optional OpenRouter Broadcast /v1/traces endpoint. The container listens on 8318/tcp." Type="Port" Display="always" Required="true" Mask="false">18418</Config>
   <Config Name="Persistent Data" Target="/data" Default="/mnt/user/Docker/ai-usage-tracker" Mode="rw" Description="Stores the server SQLite database and WAL files." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/Docker/ai-usage-tracker</Config>
 </Container>
