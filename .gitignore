@@ -1,4 +1,5 @@
 __pycache__/
 *.py[cod]
 codex_usage.sqlite*
+codex_usage_server.sqlite*
 codex_usage_observer.toml

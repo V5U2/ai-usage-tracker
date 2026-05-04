@@ -1,13 +1,20 @@
 # Codex Usage Observer
 
-This is a local observability setup for your own Codex usage. It runs a local
-OTLP/HTTP receiver, stores raw Codex telemetry in SQLite, and extracts simple
-token usage rows whenever Codex emits token attributes.
+This is a local and multi-machine observability setup for Codex usage. The
+client runs a local OTLP/HTTP receiver, stores extracted usage rows in SQLite,
+and can forward compact usage events to a central server. The server aggregates
+usage across machines and includes a simple LAN-only admin UI for client tokens.
 
 ## 1. Start the local receiver
 
 ```bash
 python3 codex_usage_observer.py serve --port 4318
+```
+
+The explicit client command is equivalent:
+
+```bash
+python3 codex_usage_observer.py client serve --port 4318
 ```
 
 Leave that process running while you use Codex.
@@ -23,6 +30,8 @@ python3 codex_usage_observer.py --config codex_usage_observer.toml serve --port 
 Start from `codex_usage_observer.example.toml`. The main storage choices are:
 
 - `client_name`: names this machine/client for later aggregation.
+- `[server]`: optional central server endpoint and client API key.
+- `[central_server]`: bind address and database for the central server.
 - `raw_payload_body`: store full raw OTEL payload bodies, or keep only metadata.
 - `extracted_attributes`: store extracted attributes as `redacted`, `full`, or `none`.
 - `model`, `session_id`, `thread_id`: choose whether these dimensions are stored on usage rows.
@@ -46,6 +55,42 @@ The important points are `otlp-http`, a local `/v1/logs` endpoint, and `json`.
 The receiver also stores non-JSON payloads raw, but token extraction needs JSON.
 Codex batches telemetry asynchronously, so start a fresh Codex session after
 changing this config and check the observer again after the session has ended.
+
+## Central server
+
+Start the central server:
+
+```bash
+python3 codex_usage_observer.py --config codex_usage_observer.toml server serve
+```
+
+By default it binds to `127.0.0.1:8318`. Use `--allow-remote` only on a trusted
+LAN; the MVP admin UI has no login and relies on network placement.
+
+Open `/admin` in a browser to create, rename, and revoke client tokens. New
+tokens are shown once. Only token hashes are stored in the server SQLite DB.
+
+Configure each client with the generated token:
+
+```toml
+client_name = "work-laptop"
+
+[server]
+endpoint = "http://server-host:8318"
+api_key = "ait_generated_token_from_admin_ui"
+batch_size = 100
+timeout_seconds = 10
+```
+
+The client keeps local reports and queues unsynced rows. Run a manual retry with:
+
+```bash
+python3 codex_usage_observer.py client sync
+```
+
+The server accepts compact usage batches at `POST /api/v1/usage-events`. Report
+APIs are available at `GET /api/v1/reports/usage` and `GET /api/v1/stats` using
+`Authorization: Bearer <central_server.admin_api_key>`.
 
 ## 3. Check token totals
 
@@ -104,6 +149,9 @@ python3 codex_usage_observer.py --config codex_usage_observer.toml cleanup
 - `session`
 - `day-model`
 - `day-session`
+
+Server report APIs also support `client`, `day-client`, and
+`day-model-client`.
 
 Filters use UTC timestamps. A plain date such as `2026-05-01` is accepted for
 `--since` and `--until`. Output formats are `table`, `csv`, and `json`.

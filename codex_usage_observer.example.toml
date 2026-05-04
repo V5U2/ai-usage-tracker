@@ -1,5 +1,21 @@
 client_name = "local"
 
+[server]
+# Optional central server forwarding. Leave endpoint/api_key unset for local-only
+# collection.
+# endpoint = "http://127.0.0.1:8318"
+# api_key = "ait_generated_token_from_admin_ui"
+batch_size = 100
+timeout_seconds = 10
+
+[central_server]
+# Used by `python3 codex_usage_observer.py server serve`.
+host = "127.0.0.1"
+port = 8318
+db = "codex_usage_server.sqlite"
+# Required for JSON report APIs. The LAN-only admin UI does not require login.
+# admin_api_key = "change-me"
+
 [storage]
 # Store raw OTEL payload bodies for troubleshooting. Set false to keep only
 # payload metadata plus extracted token rows.
