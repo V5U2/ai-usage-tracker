@@ -18,13 +18,19 @@ import shutil
 import sqlite3
 import sys
 import time
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterable, Sequence, TextIO
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
+    tomllib = None  # type: ignore[assignment]
 
 DEFAULT_DB = Path(os.environ.get("CODEX_USAGE_DB", "codex_usage.sqlite"))
-MAX_BODY_BYTES = int(os.environ.get("CODEX_USAGE_MAX_BODY_BYTES", str(50 * 1024 * 1024)))
+DEFAULT_CONFIG = Path(os.environ.get("CODEX_USAGE_CONFIG", "codex_usage_observer.toml"))
+DEFAULT_MAX_BODY_BYTES = int(os.environ.get("CODEX_USAGE_MAX_BODY_BYTES", str(50 * 1024 * 1024)))
 SENSITIVE_ATTR_KEYS = {
     "authorization",
     "cookie",
@@ -116,6 +122,89 @@ NUMERIC_COLUMNS = {
     "reasoning_tokens",
 }
 TIME_COLUMNS = {"first_seen", "last_seen"}
+
+
+@dataclass(frozen=True)
+class StorageConfig:
+    raw_payload_body: bool = True
+    extracted_attributes: str = "redacted"
+    model: bool = True
+    session_id: bool = True
+    thread_id: bool = True
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    storage: StorageConfig = field(default_factory=StorageConfig)
+    redaction_keys: frozenset[str] = frozenset(SENSITIVE_ATTR_KEYS)
+    redaction_key_parts: tuple[str, ...] = SENSITIVE_ATTR_PARTS
+
+
+DEFAULT_APP_CONFIG = AppConfig()
+
+
+def bool_config(data: dict[str, Any], key: str, default: bool) -> bool:
+    value = data.get(key, default)
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{key} must be true or false")
+
+
+def int_config(data: dict[str, Any], key: str, default: int) -> int:
+    value = data.get(key, default)
+    if isinstance(value, int) and value >= 0:
+        return value
+    raise ValueError(f"{key} must be a non-negative integer")
+
+
+def list_config(data: dict[str, Any], key: str, default: Iterable[str]) -> tuple[str, ...]:
+    value = data.get(key)
+    if value is None:
+        return tuple(default)
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(value)
+    raise ValueError(f"{key} must be a list of strings")
+
+
+def load_config(path: Path | None) -> AppConfig:
+    if path is None or not path.exists():
+        return DEFAULT_APP_CONFIG
+    if path.suffix.lower() == ".json":
+        data = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        if tomllib is None:
+            raise ValueError("TOML config files require Python 3.11+; use JSON on this Python version")
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("config root must be a table/object")
+
+    storage_data = data.get("storage", {})
+    redaction_data = data.get("redaction", {})
+    if not isinstance(storage_data, dict):
+        raise ValueError("storage must be a table/object")
+    if not isinstance(redaction_data, dict):
+        raise ValueError("redaction must be a table/object")
+
+    extracted_attributes = storage_data.get("extracted_attributes", "redacted")
+    if extracted_attributes not in ("redacted", "full", "none"):
+        raise ValueError('storage.extracted_attributes must be "redacted", "full", or "none"')
+
+    storage = StorageConfig(
+        raw_payload_body=bool_config(storage_data, "raw_payload_body", True),
+        extracted_attributes=str(extracted_attributes),
+        model=bool_config(storage_data, "model", True),
+        session_id=bool_config(storage_data, "session_id", True),
+        thread_id=bool_config(storage_data, "thread_id", True),
+        max_body_bytes=int_config(storage_data, "max_body_bytes", DEFAULT_MAX_BODY_BYTES),
+    )
+    return AppConfig(
+        storage=storage,
+        redaction_keys=frozenset(key.lower() for key in list_config(redaction_data, "keys", SENSITIVE_ATTR_KEYS)),
+        redaction_key_parts=tuple(
+            part.lower() for part in list_config(redaction_data, "key_parts", SENSITIVE_ATTR_PARTS)
+        ),
+    )
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -260,15 +349,25 @@ def flatten_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
     return flattened
 
 
-def redact_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
+def redact_attrs(attrs: dict[str, Any], config: AppConfig) -> dict[str, Any]:
     redacted: dict[str, Any] = {}
     for key, value in attrs.items():
         normalized = key.lower()
-        if normalized in SENSITIVE_ATTR_KEYS or any(part in normalized for part in SENSITIVE_ATTR_PARTS):
+        if normalized in config.redaction_keys or any(part in normalized for part in config.redaction_key_parts):
             redacted[key] = "[redacted]"
         else:
             redacted[key] = value
     return redacted
+
+
+def stored_attributes_json(attrs: dict[str, Any], config: AppConfig) -> str:
+    if config.storage.extracted_attributes == "none":
+        return "{}"
+    if config.storage.extracted_attributes == "full":
+        stored_attrs = attrs
+    else:
+        stored_attrs = redact_attrs(attrs, config)
+    return json.dumps(stored_attrs, sort_keys=True)
 
 
 def has_token_signal(attrs: dict[str, Any]) -> bool:
@@ -280,6 +379,7 @@ def usage_from_attrs(
     signal: str,
     event_name: str | None,
     attrs: dict[str, Any],
+    config: AppConfig = DEFAULT_APP_CONFIG,
 ) -> dict[str, Any] | None:
     attrs = flatten_attrs(attrs)
     input_tokens = int_attr(attrs, TOKEN_KEYS["input"])
@@ -297,15 +397,21 @@ def usage_from_attrs(
     return {
         "signal": signal,
         "event_name": event_name,
-        "model": first_attr(attrs, ("model", "model_name", "gen_ai.request.model", "gen_ai.response.model")),
-        "session_id": first_attr(attrs, ("session_id", "session.id", "codex.session_id")),
-        "thread_id": first_attr(attrs, ("thread_id", "thread.id", "codex.thread_id")),
+        "model": first_attr(attrs, ("model", "model_name", "gen_ai.request.model", "gen_ai.response.model"))
+        if config.storage.model
+        else None,
+        "session_id": first_attr(attrs, ("session_id", "session.id", "codex.session_id"))
+        if config.storage.session_id
+        else None,
+        "thread_id": first_attr(attrs, ("thread_id", "thread.id", "codex.thread_id"))
+        if config.storage.thread_id
+        else None,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
         "cached_tokens": cached_tokens,
         "reasoning_tokens": reasoning_tokens,
-        "attributes_json": json.dumps(redact_attrs(attrs), sort_keys=True),
+        "attributes_json": stored_attributes_json(attrs, config),
     }
 
 
@@ -356,24 +462,31 @@ def iter_metrics(payload: dict[str, Any]) -> Iterable[tuple[str | None, dict[str
                     yield name, attrs
 
 
-def extract_usage(path: str, body: bytes) -> list[dict[str, Any]]:
+def extract_usage(path: str, body: bytes, config: AppConfig = DEFAULT_APP_CONFIG) -> list[dict[str, Any]]:
     payload = json.loads(body.decode("utf-8"))
     if path.endswith("/v1/logs"):
-        events = (usage_from_attrs("logs", name, attrs) for name, attrs in iter_log_records(payload))
+        events = (usage_from_attrs("logs", name, attrs, config) for name, attrs in iter_log_records(payload))
     elif path.endswith("/v1/traces"):
-        events = (usage_from_attrs("traces", name, attrs) for name, attrs in iter_spans(payload))
+        events = (usage_from_attrs("traces", name, attrs, config) for name, attrs in iter_spans(payload))
     elif path.endswith("/v1/metrics"):
-        events = (usage_from_attrs("metrics", name, attrs) for name, attrs in iter_metrics(payload))
+        events = (usage_from_attrs("metrics", name, attrs, config) for name, attrs in iter_metrics(payload))
     else:
         events = []
     return [event for event in events if event]
 
 
-def insert_payload(con: sqlite3.Connection, path: str, content_type: str | None, body: bytes) -> int:
+def insert_payload(
+    con: sqlite3.Connection,
+    path: str,
+    content_type: str | None,
+    body: bytes,
+    config: AppConfig = DEFAULT_APP_CONFIG,
+) -> int:
     received_at = now_iso()
+    stored_body = body if config.storage.raw_payload_body else b""
     cur = con.execute(
         "insert into raw_payloads(received_at, path, content_type, body) values (?, ?, ?, ?)",
-        (received_at, path, content_type, body),
+        (received_at, path, content_type, stored_body),
     )
     return int(cur.lastrowid)
 
@@ -593,7 +706,7 @@ def print_compact_rows(rows: Sequence[sqlite3.Row], columns: Sequence[str]) -> N
             cell = format_cell(column, row[column])
             if not cell:
                 continue
-            entry = f"{DISPLAY_NAMES[column]}: {cell}"
+            entry = f"{DISPLAY_NAMES.get(column, column)}: {cell}"
             if column in ("period", "model", "session_id", "events", "total_tokens", "last_seen"):
                 first_line.append(entry)
             else:
@@ -636,10 +749,11 @@ def print_table(rows: Sequence[sqlite3.Row], columns: Sequence[str] = REPORT_COL
 
 class Receiver(BaseHTTPRequestHandler):
     db_path: Path = DEFAULT_DB
+    app_config: AppConfig = DEFAULT_APP_CONFIG
 
     def do_POST(self) -> None:
         length = int(self.headers.get("content-length", "0"))
-        if length > MAX_BODY_BYTES:
+        if length > self.app_config.storage.max_body_bytes:
             self.send_response(413)
             self.send_header("content-type", "application/json")
             self.end_headers()
@@ -651,11 +765,11 @@ class Receiver(BaseHTTPRequestHandler):
 
         con = connect(self.db_path)
         try:
-            raw_id = insert_payload(con, self.path, content_type, body)
+            raw_id = insert_payload(con, self.path, content_type, body, self.app_config)
             events: list[dict[str, Any]] = []
             if content_type and "json" in content_type:
                 try:
-                    events = extract_usage(self.path, body)
+                    events = extract_usage(self.path, body, self.app_config)
                 except Exception as exc:  # Keep raw data even when parser lags schema changes.
                     sys.stderr.write(f"parse error for {self.path}: {exc}\n")
             insert_usage(con, raw_id, received_at, events)
@@ -681,6 +795,7 @@ def serve(args: argparse.Namespace) -> None:
         )
         raise SystemExit(2)
     Receiver.db_path = Path(args.db)
+    Receiver.app_config = load_config(Path(args.config))
     connect(Receiver.db_path).close()
     server = ThreadingHTTPServer((args.host, args.port), Receiver)
     print(f"Listening on http://{args.host}:{args.port}; db={Receiver.db_path}", flush=True)
@@ -784,6 +899,7 @@ def stats(args: argparse.Namespace) -> None:
 
 def reindex(args: argparse.Namespace) -> None:
     con = connect(Path(args.db))
+    config = load_config(Path(args.config))
     try:
         if not args.keep_existing:
             con.execute("delete from usage_events")
@@ -800,7 +916,7 @@ def reindex(args: argparse.Namespace) -> None:
             if "json" not in content_type:
                 continue
             try:
-                events = extract_usage(row["path"], bytes(row["body"]))
+                events = extract_usage(row["path"], bytes(row["body"]), config)
             except Exception as exc:
                 sys.stderr.write(f"parse error for raw payload {row['id']}: {exc}\n")
                 continue
@@ -867,8 +983,10 @@ def report(args: argparse.Namespace) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default=str(DEFAULT_DB))
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     db_parent = argparse.ArgumentParser(add_help=False)
     db_parent.add_argument("--db", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    db_parent.add_argument("--config", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_serve = sub.add_parser("serve", parents=[db_parent])

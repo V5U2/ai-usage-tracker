@@ -14,6 +14,19 @@ Leave that process running while you use Codex.
 By default, the receiver binds only to `127.0.0.1`. Use `--allow-remote` only
 on a trusted network; OTEL payloads can contain sensitive local telemetry.
 
+Optional: use a config file to control what gets persisted:
+
+```bash
+python3 codex_usage_observer.py --config codex_usage_observer.toml serve --port 4318
+```
+
+Start from `codex_usage_observer.example.toml`. The main storage choices are:
+
+- `raw_payload_body`: store full raw OTEL payload bodies, or keep only metadata.
+- `extracted_attributes`: store extracted attributes as `redacted`, `full`, or `none`.
+- `model`, `session_id`, `thread_id`: choose whether these dimensions are stored on usage rows.
+- `max_body_bytes`: reject oversized inbound payloads.
+
 ## 2. Configure Codex telemetry
 
 Add this to `~/.codex/config.toml`:
@@ -65,6 +78,12 @@ Raw payloads are stored locally for troubleshooting and may include account
 metadata or prompt-related telemetry depending on your Codex configuration. Do
 not commit `codex_usage.sqlite*` files or share `dump-raw` output publicly.
 Extracted usage samples redact common credential and account fields.
+If you change storage settings after collecting data, run `reindex` to rebuild
+extracted usage rows from stored raw payloads:
+
+```bash
+python3 codex_usage_observer.py --config codex_usage_observer.toml reindex
+```
 
 ## Reports
 

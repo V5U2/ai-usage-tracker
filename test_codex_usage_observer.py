@@ -80,6 +80,43 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(attrs["input_token_count"], "13")
         self.assertEqual(attrs["output_token_count"], "2")
 
+    def test_config_can_omit_attributes_and_identity_columns(self):
+        config = app.AppConfig(
+            storage=app.StorageConfig(
+                extracted_attributes="none",
+                model=False,
+                session_id=False,
+                thread_id=False,
+            )
+        )
+        payload = log_payload(
+            {
+                "event.name": "response.completed",
+                "model": "gpt-test",
+                "session.id": "session-1",
+                "thread.id": "thread-1",
+                "input_tokens": 11,
+                "output_tokens": 7,
+            }
+        )
+
+        event = app.extract_usage("/v1/logs", json.dumps(payload).encode(), config)[0]
+
+        self.assertIsNone(event["model"])
+        self.assertIsNone(event["session_id"])
+        self.assertIsNone(event["thread_id"])
+        self.assertEqual(event["attributes_json"], "{}")
+
+    def test_config_can_omit_raw_payload_body(self):
+        config = app.AppConfig(storage=app.StorageConfig(raw_payload_body=False))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect(Path(tmp) / "usage.sqlite")
+            raw_id = app.insert_payload(con, "/v1/logs", "application/json", b'{"secret": true}', config)
+            body = con.execute("select body from raw_payloads where id = ?", (raw_id,)).fetchone()["body"]
+
+            self.assertEqual(bytes(body), b"")
+            con.close()
+
 
 class DatabaseReportTests(unittest.TestCase):
     def test_report_rows_group_by_day_model(self):

@@ -1,0 +1,37 @@
+[storage]
+# Store raw OTEL payload bodies for troubleshooting. Set false to keep only
+# payload metadata plus extracted token rows.
+raw_payload_body = true
+
+# Controls the attributes_json stored with extracted usage events:
+# - "redacted": keep attributes but redact common account/credential fields
+# - "full": keep all extracted attributes
+# - "none": store no extracted attributes
+extracted_attributes = "redacted"
+
+# Store these dimensions on extracted usage rows.
+model = true
+session_id = true
+thread_id = true
+
+# Reject larger inbound payloads.
+max_body_bytes = 52428800
+
+[redaction]
+# These replace the default redaction lists when provided.
+keys = [
+  "authorization",
+  "cookie",
+  "set-cookie",
+  "user.account_id",
+  "user.email",
+]
+key_parts = [
+  "api_key",
+  "apikey",
+  "auth_token",
+  "bearer",
+  "credential",
+  "password",
+  "secret",
+]
