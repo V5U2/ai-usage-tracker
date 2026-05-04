@@ -313,14 +313,82 @@ python3 codex_usage_observer.py client sync-status
 python3 codex_usage_observer.py client sync-status --errors 5
 ```
 
-The server accepts compact usage and tool-event batches at `POST /api/v1/usage-events`.
-Open `/reports` in a browser to view token totals grouped by client and model by
-default, with filters for date, client, model, session, grouping, and row limit.
+The server accepts compact usage and tool-event batches from collectors at
+`POST /api/v1/usage-events`. Open `/reports` in a browser to view token totals
+grouped by client and model by default, with filters for date, client, model,
+session, source, workspace, API key, provider, grouping, and row limit.
 Open `/tools` to view Codex tool calls grouped by client and tool. The web UI
 keeps UTC timestamps in the page data and displays them in the browser's local
 time zone. Report APIs are available at `GET /api/v1/reports/usage`,
 `GET /api/v1/reports/tools`, and `GET /api/v1/stats` using
 `Authorization: Bearer <aggregation_server.admin_api_key>`.
+
+### OpenRouter Broadcast ingest
+
+The aggregation server can also accept OpenRouter Broadcast OTLP/HTTP JSON
+traces directly at `POST /v1/traces`. This is separate from collector sync:
+collectors keep using `/api/v1/usage-events`, and Broadcast rows are stored under
+the reserved synthetic client name `openrouter-broadcast`.
+
+Enable the machine-ingest path in the server config:
+
+```toml
+[openrouter_broadcast]
+enabled = true
+api_key = "change-me"
+# Optional exact-match pass-through header check.
+# required_header_name = "CF-Access-Client-Id"
+# required_header_value = "your.cloudflare.access.client.id"
+retain_payload_body = true
+```
+
+Configure OpenRouter Broadcast with an OpenTelemetry Collector or Webhook
+destination pointing at:
+
+```text
+https://usage.example.com/v1/traces
+```
+
+Use custom headers:
+
+```json
+{
+  "Authorization": "Bearer change-me",
+  "CF-Access-Client-Id": "your.cloudflare.access.client.id",
+  "CF-Access-Client-Secret": "your.cloudflare.access.client.secret"
+}
+```
+
+The `Authorization` header is validated by this app. Cloudflare Access headers
+only get the request through Cloudflare unless you also configure
+`required_header_name` and `required_header_value`.
+
+For privacy, enable OpenRouter Broadcast Privacy Mode when you only need usage,
+cost, model, provider, timing, and metadata. The server never stores raw bearer
+secrets as report dimensions; OpenRouter API-key reporting uses non-secret labels
+or IDs from the trace metadata when available. Secret-shaped attributes in
+`attributes_json` still follow the redaction rules.
+
+OpenRouter-focused report shortcuts are available on `/reports`, including:
+
+```text
+/reports?group_by=workspace&source_kind=openrouter_broadcast
+/reports?group_by=api-key&source_kind=openrouter_broadcast
+/reports?group_by=provider&source_kind=openrouter_broadcast
+```
+
+The default `/reports` view remains `client-model` for collector compatibility.
+
+Retained Broadcast payloads can be replayed after parser changes:
+
+```bash
+python3 codex_usage_observer.py --config codex_usage_observer.toml \
+  server replay-broadcast --replay-status ingested
+```
+
+Useful selectors include `--payload-id`, `--since`, `--until`,
+`--replay-status`, and `--limit`. Replay reuses the live Broadcast parser and is
+idempotent against the derived OpenRouter event id.
 
 ### Cloudflare Access in front of the aggregation server
 
