@@ -74,6 +74,19 @@ CLIENT_NAME="$(hostname)" \
 deploy/collector/install-linux-systemd.sh
 ```
 
+For updates, use the update-only script. It preserves the existing config and
+credentials, copies code, restarts the service, and prints sync progress:
+
+```bash
+deploy/collector/update-linux-systemd.sh
+deploy/collector/update-remote-linux-systemd.sh james-dev1
+```
+
+Tagged releases also include a collector tarball,
+`ai-usage-tracker-collector-<tag>.tar.gz`, with the collector code and deploy
+scripts. Extract it on a client and run the matching update script to upgrade
+without rewriting `codex_usage_observer.toml`.
+
 On WSL with systemd enabled, run the receiver as a user service so it starts
 automatically with the WSL user session:
 
@@ -144,6 +157,20 @@ COLLECTOR_API_KEY=ait_generated_token_from_admin_ui \
 CLIENT_NAME="$(scutil --get LocalHostName 2>/dev/null || hostname)" \
 deploy/collector/install-macos-launchd.sh
 ```
+
+For updates, use the update-only script. Override `LABEL` or `PYTHON_BIN` if the
+local LaunchAgent differs from the installer defaults:
+
+```bash
+LABEL=com.james.ai-usage-tracker.receiver \
+PYTHON_BIN=/opt/homebrew/bin/python3.13 \
+deploy/collector/update-macos-launchd.sh
+```
+
+Tagged releases also include a collector tarball,
+`ai-usage-tracker-collector-<tag>.tar.gz`, with the collector code and deploy
+scripts. Extract it on a client and run the matching update script to upgrade
+without rewriting `codex_usage_observer.toml`.
 
 Codex does not start the receiver automatically. On macOS, install a user
 LaunchAgent if you want the receiver to start when you log in:
@@ -270,10 +297,19 @@ Each collector keeps its own local reports and queues unsynced rows. It tracks
 the server target it last synced each event to. If `client_name`,
 `[collector].endpoint`, or `[collector].api_key` changes, historical usage
 becomes pending for that new target and is sent on collector startup or the next
-manual sync. Run a manual retry with:
+manual sync. During normal collection, each payload that extracts usage also
+drains up to `[collector].batch_size` pending usage rows and tool rows. Run a
+manual retry with:
 
 ```bash
 python3 codex_usage_observer.py client sync
+```
+
+Check collector sync progress with:
+
+```bash
+python3 codex_usage_observer.py client sync-status
+python3 codex_usage_observer.py client sync-status --errors 5
 ```
 
 The server accepts compact usage and tool-event batches at `POST /api/v1/usage-events`.
@@ -282,6 +318,49 @@ default, with filters for date, client, model, session, grouping, and row limit.
 Open `/tools` to view Codex tool calls grouped by client and tool. Report APIs
 are available at `GET /api/v1/reports/usage`, `GET /api/v1/reports/tools`, and
 `GET /api/v1/stats` using `Authorization: Bearer <aggregation_server.admin_api_key>`.
+
+### Cloudflare Access in front of the aggregation server
+
+When the aggregation server is exposed through Cloudflare Access, keep the web
+UI protected with your identity provider and use a Cloudflare Access service
+token for headless collectors. The collector still sends the app-level
+`api_key` as `Authorization: Bearer ...`; the Cloudflare service token only
+gets the request through Cloudflare Access.
+
+Create a Cloudflare Access service token for collectors, add a Service Auth
+policy for the aggregation app or at least `/api/v1/usage-events`, then configure
+each collector:
+
+```toml
+client_name = "work-laptop"
+
+[collector]
+endpoint = "https://usage.example.com"
+api_key = "ait_generated_token_from_admin_ui"
+cloudflare_access_client_id = "your.cloudflare.access.client.id"
+cloudflare_access_client_secret = "your.cloudflare.access.client.secret"
+batch_size = 100
+timeout_seconds = 10
+```
+
+Collector sync requests then include:
+
+```http
+CF-Access-Client-Id: your.cloudflare.access.client.id
+CF-Access-Client-Secret: your.cloudflare.access.client.secret
+Authorization: Bearer ait_generated_token_from_admin_ui
+```
+
+Do not publicly bypass `/api/v1/usage-events` unless the origin is otherwise
+locked down. A Cloudflare Service Auth policy keeps the endpoint machine-only
+while preserving normal browser authentication for `/reports`, `/tools`, and
+`/admin`.
+
+If collector sync redirects to the Cloudflare Access login page, verify the
+Access policy includes a Service Auth rule for that service token and that the
+rule covers `/api/v1/usage-events`. On macOS, prefer a modern Python build such
+as Homebrew Python for launchd collectors; Apple's `/usr/bin/python3` may use an
+older LibreSSL that Cloudflare rejects before Access auth runs.
 
 Older configs using `[server]` for collector forwarding and `[central_server]`
 for aggregation-server settings are still accepted. Prefer `[collector]` and
