@@ -51,7 +51,7 @@ batch_size = 100
 timeout_seconds = 10
 
 [storage]
-raw_payload_body = true
+raw_payload_body = false
 extracted_attributes = "redacted"
 model = true
 session_id = true

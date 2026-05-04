@@ -21,9 +21,9 @@ db = "codex_usage_server.sqlite"
 # admin_api_key = "change-me"
 
 [storage]
-# Store raw OTEL payload bodies for troubleshooting. Set false to keep only
-# payload metadata plus extracted token rows.
-raw_payload_body = true
+# Keep only payload metadata plus extracted token/tool rows by default. Set true
+# temporarily when troubleshooting raw OTEL payload parsing.
+raw_payload_body = false
 
 # Controls the attributes_json stored with extracted usage events:
 # - "redacted": keep attributes but redact common account/credential fields

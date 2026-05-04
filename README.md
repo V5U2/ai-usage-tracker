@@ -137,7 +137,8 @@ Start from `codex_usage_observer.example.toml`. The main collector choices are:
 
 - `client_name`: names this machine/client for later aggregation.
 - `[collector]`: optional aggregation-server endpoint and client API key for forwarding.
-- `raw_payload_body`: store full raw OTEL payload bodies, or keep only metadata.
+- `raw_payload_body`: keep only payload metadata by default. Set true only when
+  troubleshooting raw OTEL payload parsing.
 - `extracted_attributes`: store extracted attributes as `redacted`, `full`, or `none`.
 - `model`, `session_id`, `thread_id`: choose whether these dimensions are stored on usage rows.
 - `max_body_bytes`: reject oversized inbound payloads.
@@ -315,9 +316,11 @@ python3 codex_usage_observer.py client sync-status --errors 5
 The server accepts compact usage and tool-event batches at `POST /api/v1/usage-events`.
 Open `/reports` in a browser to view token totals grouped by client and model by
 default, with filters for date, client, model, session, grouping, and row limit.
-Open `/tools` to view Codex tool calls grouped by client and tool. Report APIs
-are available at `GET /api/v1/reports/usage`, `GET /api/v1/reports/tools`, and
-`GET /api/v1/stats` using `Authorization: Bearer <aggregation_server.admin_api_key>`.
+Open `/tools` to view Codex tool calls grouped by client and tool. The web UI
+keeps UTC timestamps in the page data and displays them in the browser's local
+time zone. Report APIs are available at `GET /api/v1/reports/usage`,
+`GET /api/v1/reports/tools`, and `GET /api/v1/stats` using
+`Authorization: Bearer <aggregation_server.admin_api_key>`.
 
 ### Cloudflare Access in front of the aggregation server
 
@@ -497,10 +500,11 @@ python3 codex_usage_observer.py raw --limit 20
 python3 codex_usage_observer.py dump-raw 1
 ```
 
-Raw payloads are stored locally for troubleshooting and may include account
-metadata or prompt-related telemetry depending on your Codex configuration. Do
-not commit `codex_usage.sqlite*` files or share `dump-raw` output publicly.
-Extracted usage samples redact common credential and account fields.
+Raw payload bodies are not stored by default. If you temporarily set
+`raw_payload_body = true` for troubleshooting, raw OTEL payloads may include
+account metadata or prompt-related telemetry depending on your Codex
+configuration. Do not commit `codex_usage.sqlite*` files or share `dump-raw`
+output publicly. Extracted usage samples redact common credential and account fields.
 If you change storage settings after collecting data, run `reindex` to rebuild
 extracted usage rows from stored raw payloads:
 
@@ -535,7 +539,9 @@ Server report APIs and the `/reports` web page also support `client`,
 `codex.tool_result` events; pass `--event-name ""` to include decisions too.
 
 Filters use UTC timestamps. A plain date such as `2026-05-01` is accepted for
-`--since` and `--until`. Output formats are `table`, `csv`, and `json`.
+`--since` and `--until`. CLI and API output keep server UTC timestamps; the web
+views display those UTC values in the browser's local time zone. Output formats
+are `table`, `csv`, and `json`.
 
 ## Limits
 
