@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Container version="2">
+  <Name>ai-usage-tracker</Name>
+  <Repository>ghcr.io/v5u2/ai-usage-tracker:latest</Repository>
+  <Registry>https://github.com/V5U2/ai-usage-tracker/pkgs/container/ai-usage-tracker</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/V5U2/ai-usage-tracker/issues</Support>
+  <Project>https://github.com/V5U2/ai-usage-tracker</Project>
+  <Overview>Central aggregation server for Codex AI usage telemetry. Collectors forward compact usage events to this server, which stores them in SQLite and exposes token reports plus client-token administration.</Overview>
+  <Category>Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8318]/reports</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/unraid/ai-usage-tracker.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/unraid/ai-usage-tracker.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="Web UI / API Port" Target="8318" Default="8318" Mode="tcp" Description="Host port for the aggregation server web UI, admin UI, reports, and ingestion API." Type="Port" Display="always" Required="true" Mask="false">8318</Config>
+  <Config Name="Persistent Data" Target="/data" Default="/mnt/user/appdata/ai-usage-tracker" Mode="rw" Description="Stores the server SQLite database and WAL files." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/ai-usage-tracker</Config>
+</Container>

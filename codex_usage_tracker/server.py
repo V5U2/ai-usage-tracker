@@ -1,3 +1,3 @@
-"""Server-side compatibility exports."""
+"""Compatibility exports for the aggregation server component."""
 
-from .core import *  # noqa: F401,F403
+from .aggregation_server import *  # noqa: F401,F403

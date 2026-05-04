@@ -5,6 +5,19 @@ client runs a local OTLP/HTTP receiver, stores extracted usage rows in SQLite,
 and can forward compact usage events to a central server. The server aggregates
 usage across machines and includes a simple LAN-only admin UI for client tokens.
 
+## Repository layout
+
+- `codex_usage_tracker/collector/`: local OTLP receiver/collector surface,
+  including local persistence and forwarding to a server.
+- `codex_usage_tracker/aggregation_server/`: central aggregation server surface,
+  including client tokens, ingestion APIs, and web reports.
+- `codex_usage_tracker/core.py`: shared implementation used by both components
+  and the compatibility CLI.
+- `codex_usage_observer.py`: top-level compatibility CLI entry point.
+- `docker/`, `Dockerfile`, `docker-compose.yml`: containerized aggregation
+  server setup.
+- `unraid/`: Unraid Docker template for deploying the aggregation server.
+
 ## 1. Start the local receiver
 
 ```bash
@@ -36,6 +49,79 @@ Start from `codex_usage_observer.example.toml`. The main storage choices are:
 - `extracted_attributes`: store extracted attributes as `redacted`, `full`, or `none`.
 - `model`, `session_id`, `thread_id`: choose whether these dimensions are stored on usage rows.
 - `max_body_bytes`: reject oversized inbound payloads.
+
+### macOS auto-start with launchd
+
+Codex does not start the receiver automatically. On macOS, install a user
+LaunchAgent if you want the receiver to start when you log in:
+
+```bash
+mkdir -p "$HOME/Library/Application Support/ai-usage-tracker"
+cp -R codex_usage_observer.py codex_usage_tracker codex_usage_observer.toml \
+  "$HOME/Library/Application Support/ai-usage-tracker/"
+mkdir -p "$HOME/Library/Logs/ai-usage-tracker" "$HOME/Library/LaunchAgents"
+```
+
+Create `~/Library/LaunchAgents/com.example.ai-usage-tracker.receiver.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.ai-usage-tracker.receiver</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/your-user/Library/Application Support/ai-usage-tracker/codex_usage_observer.py</string>
+    <string>--config</string>
+    <string>/Users/your-user/Library/Application Support/ai-usage-tracker/codex_usage_observer.toml</string>
+    <string>serve</string>
+    <string>--port</string>
+    <string>4318</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/your-user/Library/Application Support/ai-usage-tracker</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/your-user/Library/Logs/ai-usage-tracker/receiver.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/your-user/Library/Logs/ai-usage-tracker/receiver.err.log</string>
+</dict>
+</plist>
+```
+
+Replace `your-user` in the paths and label if installing for another macOS user.
+Keeping the service copy under `~/Library/Application Support` avoids macOS
+privacy restrictions that can block background agents from reading projects
+under `~/Documents`.
+
+Load and start the agent:
+
+```bash
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/com.example.ai-usage-tracker.receiver.plist"
+launchctl kickstart -k "gui/$(id -u)/com.example.ai-usage-tracker.receiver"
+```
+
+Check service state and the listening port:
+
+```bash
+launchctl print "gui/$(id -u)/com.example.ai-usage-tracker.receiver"
+lsof -iTCP:4318 -sTCP:LISTEN -n -P
+```
+
+Stop and unload it:
+
+```bash
+launchctl bootout "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/com.example.ai-usage-tracker.receiver.plist"
+```
 
 ## 2. Configure Codex telemetry
 
@@ -82,15 +168,107 @@ batch_size = 100
 timeout_seconds = 10
 ```
 
-The client keeps local reports and queues unsynced rows. Run a manual retry with:
+The client keeps local reports and queues unsynced rows. It tracks the server
+target it last synced each event to. If `client_name`, `[server].endpoint`, or
+`[server].api_key` changes, historical usage becomes pending for that new target
+and is sent on receiver startup or the next manual sync. Run a manual retry with:
 
 ```bash
 python3 codex_usage_observer.py client sync
 ```
 
-The server accepts compact usage batches at `POST /api/v1/usage-events`. Report
-APIs are available at `GET /api/v1/reports/usage` and `GET /api/v1/stats` using
-`Authorization: Bearer <central_server.admin_api_key>`.
+The server accepts compact usage and tool-event batches at `POST /api/v1/usage-events`.
+Open `/reports` in a browser to view token totals grouped by client and model by
+default, with filters for date, client, model, session, grouping, and row limit.
+Open `/tools` to view Codex tool calls grouped by client and tool. Report APIs
+are available at `GET /api/v1/reports/usage`, `GET /api/v1/reports/tools`, and
+`GET /api/v1/stats` using `Authorization: Bearer <central_server.admin_api_key>`.
+
+### Run the central server with Docker
+
+The repository includes a Docker setup for the central server component. It
+binds the container service to `127.0.0.1:8318` on the host and stores the
+server SQLite database under `./data/server`.
+
+```bash
+docker compose up -d --build
+```
+
+Open the admin UI at `http://127.0.0.1:8318/admin` to create client tokens.
+Open reports at `http://127.0.0.1:8318/reports` to view usage events and token
+counts. Open tool reports at `http://127.0.0.1:8318/tools`.
+
+Check status and logs:
+
+```bash
+docker compose ps
+docker logs --tail 50 ai-usage-tracker-server
+```
+
+Stop the server:
+
+```bash
+docker compose down
+```
+
+The container uses `docker/server.toml` and runs:
+
+```bash
+python codex_usage_observer.py --config /app/server.toml server serve \
+  --host 0.0.0.0 --port 8318 --server-db /data/codex_usage_server.sqlite \
+  --allow-remote
+```
+
+### GitHub Actions releases and images
+
+CI runs on pull requests, pushes to `main`, and manual dispatch. It runs the
+Python unittest suite on Python 3.9 and 3.12, then builds the Docker image
+without pushing it.
+
+Release publishing runs when a `v*` tag is pushed, or from manual dispatch of
+the `Release` workflow. It builds the server container and pushes it to GitHub
+Container Registry:
+
+```text
+ghcr.io/v5u2/ai-usage-tracker
+```
+
+Push a release tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Published image tags include the release tag. Stable tags without a hyphen also
+update `latest`; prerelease tags such as `v0.1.0-rc.1` do not.
+
+Manual releases can be started from the GitHub Actions UI with a `tag` input.
+The release workflow also creates or updates the matching GitHub Release with
+generated release notes. Do not bump versions, tag releases, or publish images
+unless that release action is intended.
+
+### Unraid deployment
+
+An Unraid Docker template is available at `unraid/ai-usage-tracker.xml`. It
+deploys the aggregation server from GHCR, maps port `8318`, and persists server
+SQLite data at `/mnt/user/appdata/ai-usage-tracker`.
+
+Copy the template to the Unraid host:
+
+```text
+/boot/config/plugins/dockerMan/templates-user/ai-usage-tracker.xml
+```
+
+Or import it from the raw template URL after it is available on the default
+branch:
+
+```text
+https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/unraid/ai-usage-tracker.xml
+```
+
+After starting the container, open `http://<unraid-ip>:8318/admin` to create
+collector tokens and `http://<unraid-ip>:8318/reports` to view usage reports.
 
 ## 3. Check token totals
 
@@ -104,6 +282,14 @@ For richer reporting:
 python3 codex_usage_observer.py report --group-by day-model
 python3 codex_usage_observer.py report --group-by session --since 2026-05-01
 python3 codex_usage_observer.py report --group-by total --format csv
+```
+
+To report Codex tool calls captured from OTEL:
+
+```bash
+python3 codex_usage_observer.py tools-report
+python3 codex_usage_observer.py tools-report --group-by day-tool
+python3 codex_usage_observer.py tools-report --group-by event --event-name ""
 ```
 
 To inspect extracted event attributes:
@@ -150,8 +336,12 @@ python3 codex_usage_observer.py --config codex_usage_observer.toml cleanup
 - `day-model`
 - `day-session`
 
-Server report APIs also support `client`, `day-client`, and
-`day-model-client`.
+Server report APIs and the `/reports` web page also support `client`,
+`client-model`, `day-client`, and `day-model-client`.
+
+`tools-report` supports `total`, `day`, `tool`, `session`, `event`,
+`day-tool`, and `day-session`. By default it reports completed
+`codex.tool_result` events; pass `--event-name ""` to include decisions too.
 
 Filters use UTC timestamps. A plain date such as `2026-05-01` is accepted for
 `--since` and `--until`. Output formats are `table`, `csv`, and `json`.

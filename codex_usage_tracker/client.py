@@ -1,3 +1,3 @@
-"""Client-side compatibility exports."""
+"""Compatibility exports for the collector component."""
 
-from .core import *  # noqa: F401,F403
+from .collector import *  # noqa: F401,F403

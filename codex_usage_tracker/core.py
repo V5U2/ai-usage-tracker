@@ -106,8 +106,22 @@ REPORT_COLUMNS = (
     "first_seen",
     "last_seen",
 )
+TOOL_REPORT_COLUMNS = (
+    "period",
+    "tool_name",
+    "session_id",
+    "event_name",
+    "tool_events",
+    "successes",
+    "failures",
+    "total_duration_ms",
+    "avg_duration_ms",
+    "first_seen",
+    "last_seen",
+)
 DISPLAY_NAMES = {
     "period": "day",
+    "client_name": "client",
     "model": "model",
     "session_id": "session",
     "events": "events",
@@ -116,18 +130,39 @@ DISPLAY_NAMES = {
     "total_tokens": "total",
     "cached_tokens": "cached",
     "reasoning_tokens": "reason",
+    "tool_name": "tool",
+    "tool_events": "events",
+    "successes": "ok",
+    "failures": "fail",
+    "total_duration_ms": "duration_ms",
+    "avg_duration_ms": "avg_ms",
+    "duration_ms": "duration_ms",
+    "decision": "decision",
+    "source": "source",
+    "success": "success",
+    "call_id": "call",
+    "mcp_server": "mcp",
+    "source_received_at": "time",
     "first_seen": "first",
     "last_seen": "last",
 }
 NUMERIC_COLUMNS = {
     "events",
+    "tool_events",
+    "successes",
+    "failures",
+    "total_duration_ms",
+    "avg_duration_ms",
+    "duration_ms",
     "input_tokens",
     "output_tokens",
     "total_tokens",
     "cached_tokens",
     "reasoning_tokens",
 }
-TIME_COLUMNS = {"first_seen", "last_seen"}
+TIME_COLUMNS = {"first_seen", "last_seen", "source_received_at"}
+TOOL_EVENT_NAMES = {"codex.tool_decision", "codex.tool_result"}
+VERBOSE_TOOL_ATTRS = {"arguments", "output"}
 
 
 @dataclass(frozen=True)
@@ -208,15 +243,93 @@ def optional_str_config(data: dict[str, Any], key: str) -> str | None:
     raise ValueError(f"{key} must be a non-empty string when provided")
 
 
+def strip_toml_comment(line: str) -> str:
+    in_string = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if char == "#" and not in_string:
+            return line[:index].strip()
+    return line.strip()
+
+
+def parse_basic_toml_value(value: str) -> Any:
+    value = value.strip()
+    if value in ("true", "false"):
+        return value == "true"
+    if value.startswith('"') and value.endswith('"'):
+        return json.loads(value)
+    if value.startswith("[") and value.endswith("]"):
+        body = value[1:-1].strip()
+        if not body:
+            return []
+        return [parse_basic_toml_value(item.strip()) for item in body.split(",") if item.strip()]
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"unsupported TOML value: {value}") from exc
+
+
+def load_basic_toml(text: str) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    current = data
+    pending_key: str | None = None
+    pending_values: list[str] = []
+
+    for raw_line in text.splitlines():
+        line = strip_toml_comment(raw_line)
+        if not line:
+            continue
+
+        if pending_key is not None:
+            pending_values.append(line)
+            if line.endswith("]"):
+                current[pending_key] = parse_basic_toml_value(" ".join(pending_values))
+                pending_key = None
+                pending_values = []
+            continue
+
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            if not section:
+                raise ValueError("TOML section name must be non-empty")
+            current = data.setdefault(section, {})
+            if not isinstance(current, dict):
+                raise ValueError(f"TOML section conflicts with existing key: {section}")
+            continue
+
+        if "=" not in line:
+            raise ValueError(f"unsupported TOML line: {raw_line.strip()}")
+        key, value = (part.strip() for part in line.split("=", 1))
+        if not key:
+            raise ValueError("TOML key must be non-empty")
+        if value.startswith("[") and not value.endswith("]"):
+            pending_key = key
+            pending_values = [value]
+            continue
+        current[key] = parse_basic_toml_value(value)
+
+    if pending_key is not None:
+        raise ValueError(f"unterminated TOML array for {pending_key}")
+    return data
+
+
 def load_config(path: Path | None) -> AppConfig:
     if path is None or not path.exists():
         return DEFAULT_APP_CONFIG
     if path.suffix.lower() == ".json":
         data = json.loads(path.read_text(encoding="utf-8"))
     else:
-        if tomllib is None:
-            raise ValueError("TOML config files require Python 3.11+; use JSON on this Python version")
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        data = tomllib.loads(text) if tomllib is not None else load_basic_toml(text)
     if not isinstance(data, dict):
         raise ValueError("config root must be a table/object")
 
@@ -305,11 +418,38 @@ def connect(db_path: Path) -> sqlite3.Connection:
         )
         """
     )
+    con.execute(
+        """
+        create table if not exists tool_events (
+            id integer primary key autoincrement,
+            raw_payload_id integer not null,
+            received_at text not null,
+            signal text not null,
+            event_name text not null,
+            model text,
+            session_id text,
+            thread_id text,
+            tool_name text not null,
+            call_id text,
+            decision text,
+            source text,
+            success text,
+            duration_ms integer,
+            mcp_server text,
+            attributes_json text not null,
+            foreign key(raw_payload_id) references raw_payloads(id)
+        )
+        """
+    )
     con.execute("create index if not exists idx_raw_payloads_received_at on raw_payloads(received_at)")
     con.execute("create index if not exists idx_usage_events_received_at on usage_events(received_at)")
     con.execute("create index if not exists idx_usage_events_model on usage_events(model)")
     con.execute("create index if not exists idx_usage_events_session on usage_events(session_id)")
+    con.execute("create index if not exists idx_tool_events_received_at on tool_events(received_at)")
+    con.execute("create index if not exists idx_tool_events_tool_name on tool_events(tool_name)")
+    con.execute("create index if not exists idx_tool_events_session on tool_events(session_id)")
     ensure_client_sync_schema(con)
+    con.commit()
     return con
 
 
@@ -327,6 +467,8 @@ def ensure_client_sync_schema(con: sqlite3.Connection) -> None:
         con.execute("alter table usage_events add column sync_attempts integer default 0")
     if "last_sync_error" not in columns:
         con.execute("alter table usage_events add column last_sync_error text")
+    if "synced_server_key" not in columns:
+        con.execute("alter table usage_events add column synced_server_key text")
     con.execute(
         """
         update usage_events
@@ -335,6 +477,26 @@ def ensure_client_sync_schema(con: sqlite3.Connection) -> None:
         """
     )
     con.execute("create unique index if not exists idx_usage_events_client_event_id on usage_events(client_event_id)")
+
+    tool_columns = table_columns(con, "tool_events")
+    if "client_tool_event_id" not in tool_columns:
+        con.execute("alter table tool_events add column client_tool_event_id text")
+    if "synced_at" not in tool_columns:
+        con.execute("alter table tool_events add column synced_at text")
+    if "sync_attempts" not in tool_columns:
+        con.execute("alter table tool_events add column sync_attempts integer default 0")
+    if "last_sync_error" not in tool_columns:
+        con.execute("alter table tool_events add column last_sync_error text")
+    if "synced_server_key" not in tool_columns:
+        con.execute("alter table tool_events add column synced_server_key text")
+    con.execute(
+        """
+        update tool_events
+        set client_tool_event_id = printf('tool-local-%d', id)
+        where client_tool_event_id is null or client_tool_event_id = ''
+        """
+    )
+    con.execute("create unique index if not exists idx_tool_events_client_tool_event_id on tool_events(client_tool_event_id)")
 
 
 def connect_server(db_path: Path) -> sqlite3.Connection:
@@ -378,9 +540,38 @@ def connect_server(db_path: Path) -> sqlite3.Connection:
         )
         """
     )
+    con.execute(
+        """
+        create table if not exists tool_events (
+            id integer primary key autoincrement,
+            client_name text not null,
+            client_tool_event_id text not null,
+            received_at text not null,
+            source_received_at text not null,
+            signal text not null,
+            event_name text not null,
+            model text,
+            session_id text,
+            thread_id text,
+            tool_name text not null,
+            call_id text,
+            decision text,
+            source text,
+            success text,
+            duration_ms integer,
+            mcp_server text,
+            attributes_json text not null,
+            unique(client_name, client_tool_event_id)
+        )
+        """
+    )
     con.execute("create index if not exists idx_server_usage_received_at on usage_events(source_received_at)")
     con.execute("create index if not exists idx_server_usage_client on usage_events(client_name)")
     con.execute("create index if not exists idx_server_usage_model on usage_events(model)")
+    con.execute("create index if not exists idx_server_tool_received_at on tool_events(source_received_at)")
+    con.execute("create index if not exists idx_server_tool_client on tool_events(client_name)")
+    con.execute("create index if not exists idx_server_tool_tool_name on tool_events(tool_name)")
+    con.commit()
     return con
 
 
@@ -446,6 +637,18 @@ def int_attr(attrs: dict[str, Any], aliases: tuple[str, ...]) -> int:
     return 0
 
 
+def optional_int_attr(attrs: dict[str, Any], aliases: tuple[str, ...]) -> int | None:
+    for alias in aliases:
+        value = attrs.get(alias)
+        if value in (None, ""):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def first_attr(attrs: dict[str, Any], aliases: tuple[str, ...]) -> str | None:
     for alias in aliases:
         value = attrs.get(alias)
@@ -504,6 +707,11 @@ def stored_attributes_json(attrs: dict[str, Any], config: AppConfig) -> str:
     return json.dumps(stored_attrs, sort_keys=True)
 
 
+def stored_tool_attributes_json(attrs: dict[str, Any], config: AppConfig) -> str:
+    compact_attrs = {key: value for key, value in attrs.items() if key not in VERBOSE_TOOL_ATTRS}
+    return stored_attributes_json(compact_attrs, config)
+
+
 def has_token_signal(attrs: dict[str, Any]) -> bool:
     keys = set(attrs)
     return any(any(alias in keys for alias in aliases) for aliases in TOKEN_KEYS.values())
@@ -546,6 +754,42 @@ def usage_from_attrs(
         "cached_tokens": cached_tokens,
         "reasoning_tokens": reasoning_tokens,
         "attributes_json": stored_attributes_json(attrs, config),
+    }
+
+
+def tool_event_from_attrs(
+    signal: str,
+    event_name: str | None,
+    attrs: dict[str, Any],
+    config: AppConfig = DEFAULT_APP_CONFIG,
+) -> dict[str, Any] | None:
+    attrs = flatten_attrs(attrs)
+    event_name = event_name or first_attr(attrs, ("event.name", "name"))
+    if event_name not in TOOL_EVENT_NAMES:
+        return None
+    tool_name = first_attr(attrs, ("tool_name", "gen_ai.tool.name"))
+    if not tool_name:
+        return None
+    return {
+        "signal": signal,
+        "event_name": event_name,
+        "model": first_attr(attrs, ("model", "model_name", "gen_ai.request.model", "gen_ai.response.model"))
+        if config.storage.model
+        else None,
+        "session_id": first_attr(attrs, ("session_id", "session.id", "codex.session_id", "conversation.id"))
+        if config.storage.session_id
+        else None,
+        "thread_id": first_attr(attrs, ("thread_id", "thread.id", "codex.thread_id"))
+        if config.storage.thread_id
+        else None,
+        "tool_name": tool_name,
+        "call_id": first_attr(attrs, ("call_id", "tool_call_id", "gen_ai.tool.call.id")),
+        "decision": first_attr(attrs, ("decision",)),
+        "source": first_attr(attrs, ("source",)),
+        "success": first_attr(attrs, ("success",)),
+        "duration_ms": optional_int_attr(attrs, ("duration_ms", "duration")),
+        "mcp_server": first_attr(attrs, ("mcp_server",)),
+        "attributes_json": stored_tool_attributes_json(attrs, config),
     }
 
 
@@ -609,6 +853,17 @@ def extract_usage(path: str, body: bytes, config: AppConfig = DEFAULT_APP_CONFIG
     return [event for event in events if event]
 
 
+def extract_tool_events(path: str, body: bytes, config: AppConfig = DEFAULT_APP_CONFIG) -> list[dict[str, Any]]:
+    payload = json.loads(body.decode("utf-8"))
+    if path.endswith("/v1/logs"):
+        events = (tool_event_from_attrs("logs", name, attrs, config) for name, attrs in iter_log_records(payload))
+    elif path.endswith("/v1/traces"):
+        events = (tool_event_from_attrs("traces", name, attrs, config) for name, attrs in iter_spans(payload))
+    else:
+        events = []
+    return [event for event in events if event]
+
+
 def insert_payload(
     con: sqlite3.Connection,
     path: str,
@@ -652,6 +907,39 @@ def insert_usage(con: sqlite3.Connection, raw_id: int, received_at: str, events:
                 event["reasoning_tokens"],
                 event["attributes_json"],
                 client_event_id,
+            ),
+        )
+
+
+def insert_tool_events(con: sqlite3.Connection, raw_id: int, received_at: str, events: list[dict[str, Any]]) -> None:
+    for event in events:
+        client_tool_event_id = event.get("client_tool_event_id") or f"tool_{secrets.token_urlsafe(18)}"
+        con.execute(
+            """
+            insert into tool_events(
+                raw_payload_id, received_at, signal, event_name, model, session_id, thread_id,
+                tool_name, call_id, decision, source, success, duration_ms, mcp_server, attributes_json,
+                client_tool_event_id
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                raw_id,
+                received_at,
+                event["signal"],
+                event["event_name"],
+                event["model"],
+                event["session_id"],
+                event["thread_id"],
+                event["tool_name"],
+                event["call_id"],
+                event["decision"],
+                event["source"],
+                event["success"],
+                event["duration_ms"],
+                event["mcp_server"],
+                event["attributes_json"],
+                client_tool_event_id,
             ),
         )
 
@@ -715,6 +1003,22 @@ def group_expression(group_by: str) -> tuple[str, str, str]:
     return period_expr, model_expr, session_expr
 
 
+def tool_group_expression(group_by: str) -> tuple[str, str, str, str]:
+    period_expr = "''"
+    tool_expr = "''"
+    session_expr = "''"
+    event_expr = "''"
+    if group_by in ("day", "day-tool", "day-session"):
+        period_expr = "substr(received_at, 1, 10)"
+    if group_by in ("tool", "day-tool"):
+        tool_expr = "coalesce(tool_name, '(unknown)')"
+    if group_by in ("session", "day-session"):
+        session_expr = "coalesce(session_id, '(unknown)')"
+    if group_by == "event":
+        event_expr = "event_name"
+    return period_expr, tool_expr, session_expr, event_expr
+
+
 def usage_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
     period_expr, model_expr, session_expr = group_expression(args.group_by)
     where, params = where_clause(args)
@@ -745,11 +1049,64 @@ def usage_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list
     return con.execute(query, (*params, args.limit)).fetchall()
 
 
-def write_csv(rows: Sequence[sqlite3.Row], out: TextIO) -> None:
-    writer = csv.DictWriter(out, fieldnames=REPORT_COLUMNS)
+def tool_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    since = parse_datetime_filter(getattr(args, "since", None))
+    until = parse_datetime_filter(getattr(args, "until", None), end_of_day=True)
+    if since:
+        clauses.append("received_at >= ?")
+        params.append(since)
+    if until:
+        clauses.append("received_at <= ?")
+        params.append(until)
+    if getattr(args, "tool_name", None):
+        clauses.append("tool_name = ?")
+        params.append(args.tool_name)
+    if getattr(args, "session_id", None):
+        clauses.append("session_id = ?")
+        params.append(args.session_id)
+    if getattr(args, "event_name", None):
+        clauses.append("event_name = ?")
+        params.append(args.event_name)
+    return ("where " + " and ".join(clauses), params) if clauses else ("", params)
+
+
+def tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
+    period_expr, tool_expr, session_expr, event_expr = tool_group_expression(args.group_by)
+    where, params = tool_where_clause(args)
+    order_by = "last_seen desc"
+    if args.group_by.startswith("day"):
+        order_by = "period desc, tool_events desc"
+    elif args.group_by in ("tool", "session", "event"):
+        order_by = "tool_events desc"
+    query = f"""
+        select
+            {period_expr} as period,
+            {tool_expr} as tool_name,
+            {session_expr} as session_id,
+            {event_expr} as event_name,
+            count(*) as tool_events,
+            coalesce(sum(case when success = 'true' then 1 else 0 end), 0) as successes,
+            coalesce(sum(case when success = 'false' then 1 else 0 end), 0) as failures,
+            coalesce(sum(duration_ms), 0) as total_duration_ms,
+            coalesce(round(avg(duration_ms)), 0) as avg_duration_ms,
+            min(received_at) as first_seen,
+            max(received_at) as last_seen
+        from tool_events
+        {where}
+        group by 1, 2, 3, 4
+        order by {order_by}
+        limit ?
+    """
+    return con.execute(query, (*params, args.limit)).fetchall()
+
+
+def write_csv(rows: Sequence[sqlite3.Row], out: TextIO, columns: Sequence[str] = REPORT_COLUMNS) -> None:
+    writer = csv.DictWriter(out, fieldnames=columns)
     writer.writeheader()
     for row in rows:
-        writer.writerow({column: row[column] for column in REPORT_COLUMNS})
+        writer.writerow({column: row[column] for column in columns})
 
 
 def format_timestamp(value: str | None) -> str:
@@ -791,6 +1148,7 @@ def serve_payload_log_line(
     shape: str,
     raw_body_retained: bool,
     events: int,
+    tool_events: int,
     raw_id: int,
 ) -> str:
     raw_state = "kept" if raw_body_retained else "metadata-only"
@@ -798,7 +1156,7 @@ def serve_payload_log_line(
     return (
         f"{time.strftime('%H:%M:%S')} received {path} "
         f"payload={format_bytes(body_bytes)} shape={shape} content_type={content} "
-        f"raw_body={raw_state} usage_events={events} raw_id={raw_id}"
+        f"raw_body={raw_state} usage_events={events} tool_events={tool_events} raw_id={raw_id}"
     )
 
 
@@ -879,6 +1237,93 @@ def default_columns(group_by: str) -> tuple[str, ...]:
     )
 
 
+def tool_default_columns(group_by: str) -> tuple[str, ...]:
+    if group_by == "total":
+        return ("tool_events", "successes", "failures", "total_duration_ms", "avg_duration_ms", "first_seen", "last_seen")
+    if group_by == "day":
+        return ("period", "tool_events", "successes", "failures", "total_duration_ms")
+    if group_by == "tool":
+        return ("tool_name", "tool_events", "successes", "failures", "total_duration_ms", "avg_duration_ms", "last_seen")
+    if group_by == "session":
+        return ("session_id", "tool_events", "successes", "failures", "total_duration_ms", "last_seen")
+    if group_by == "day-session":
+        return ("period", "session_id", "tool_events", "successes", "failures", "total_duration_ms")
+    if group_by == "event":
+        return ("event_name", "tool_events", "successes", "failures", "last_seen")
+    return ("period", "tool_name", "tool_events", "successes", "failures", "total_duration_ms")
+
+
+def server_default_columns(group_by: str) -> tuple[str, ...]:
+    if group_by == "client":
+        return (
+            "client_name",
+            "events",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_tokens",
+            "reasoning_tokens",
+            "last_seen",
+        )
+    if group_by == "client-model":
+        return (
+            "client_name",
+            "model",
+            "events",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_tokens",
+            "reasoning_tokens",
+            "last_seen",
+        )
+    if group_by == "day-client":
+        return (
+            "period",
+            "client_name",
+            "events",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_tokens",
+            "reasoning_tokens",
+        )
+    if group_by == "day-model-client":
+        return (
+            "period",
+            "client_name",
+            "model",
+            "events",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_tokens",
+            "reasoning_tokens",
+        )
+    return default_columns(group_by)
+
+
+def server_tool_default_columns(group_by: str) -> tuple[str, ...]:
+    if group_by == "client":
+        return ("client_name", "tool_events", "successes", "failures", "total_duration_ms", "last_seen")
+    if group_by == "client-tool":
+        return (
+            "client_name",
+            "tool_name",
+            "tool_events",
+            "successes",
+            "failures",
+            "total_duration_ms",
+            "avg_duration_ms",
+            "last_seen",
+        )
+    if group_by == "day-client":
+        return ("period", "client_name", "tool_events", "successes", "failures", "total_duration_ms")
+    if group_by == "day-tool-client":
+        return ("period", "client_name", "tool_name", "tool_events", "successes", "failures", "total_duration_ms")
+    return tool_default_columns(group_by)
+
+
 def print_compact_rows(rows: Sequence[sqlite3.Row], columns: Sequence[str]) -> None:
     for index, row in enumerate(rows, start=1):
         first_line = []
@@ -888,7 +1333,17 @@ def print_compact_rows(rows: Sequence[sqlite3.Row], columns: Sequence[str]) -> N
             if not cell:
                 continue
             entry = f"{DISPLAY_NAMES.get(column, column)}: {cell}"
-            if column in ("period", "model", "session_id", "events", "total_tokens", "last_seen"):
+            if column in (
+                "period",
+                "model",
+                "tool_name",
+                "session_id",
+                "event_name",
+                "events",
+                "tool_events",
+                "total_tokens",
+                "last_seen",
+            ):
                 first_line.append(entry)
             else:
                 second_line.append(entry)
@@ -928,6 +1383,60 @@ def print_table(rows: Sequence[sqlite3.Row], columns: Sequence[str] = REPORT_COL
         print("  ".join(cells))
 
 
+def server_nav(active: str) -> str:
+    items = (
+        ("admin", "/admin", "Admin"),
+        ("usage", "/reports", "Usage"),
+        ("tools", "/tools", "Tools"),
+    )
+    links = []
+    for key, href, label in items:
+        active_attr = ' class="active"' if key == active else ""
+        links.append(f'<a href="{href}"{active_attr}>{label}</a>')
+    return "<nav>" + "".join(links) + "</nav>"
+
+
+def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
+    extra = ""
+    if tools:
+        extra += """
+    .status { display: inline-block; min-width: 2.4rem; text-align: center; padding: .12rem .35rem; border: 1px solid #cfd7df; font-size: .78rem; }
+    .status.ok { background: #eaf7ee; border-color: #afd9bb; color: #1d6b38; }
+    .status.fail { background: #fdecec; border-color: #efb1b1; color: #9f1d1d; }
+    .status.neutral { background: #f3f6f8; color: #52606d; }
+"""
+    if admin:
+        extra += """
+    form.inline { display: inline; }
+    .token { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #f7f9fb; padding: .5rem; }
+    .message { border: 1px solid #cfd7df; padding: .6rem; background: white; }
+"""
+    return f"""
+    body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #17202a; background: #fbfcfd; }}
+    nav {{ display: flex; gap: .5rem; margin-bottom: 1.5rem; }}
+    nav a {{ border: 1px solid #cfd7df; color: #17202a; padding: .4rem .65rem; text-decoration: none; background: white; }}
+    nav a.active {{ background: #17202a; color: white; border-color: #17202a; }}
+    main {{ display: grid; gap: 1.25rem; }}
+    table {{ border-collapse: collapse; width: 100%; background: white; }}
+    th, td {{ border-bottom: 1px solid #d7dde3; padding: .5rem; text-align: left; vertical-align: top; }}
+    th {{ background: #f3f6f8; font-size: .82rem; color: #52606d; }}
+    input, select {{ padding: .4rem; border: 1px solid #cfd7df; background: white; }}
+    button {{ padding: .42rem .7rem; border: 1px solid #17202a; background: #17202a; color: white; }}
+    .filters {{ display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; background: white; border: 1px solid #d7dde3; padding: .85rem; }}
+    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .75rem; }}
+    .summary div {{ border: 1px solid #d7dde3; padding: .75rem; background: white; }}
+    .panel {{ display: grid; gap: .75rem; }}
+    .panel-head {{ display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; }}
+    .panel-head h2 {{ margin: 0; font-size: 1.05rem; }}
+    .quick-links {{ display: flex; flex-wrap: wrap; gap: .5rem; }}
+    .quick-links a {{ border: 1px solid #cfd7df; padding: .3rem .5rem; color: #17202a; text-decoration: none; background: white; }}
+    .label {{ color: #5b6773; font-size: .82rem; }}
+    .value {{ font-size: 1.2rem; font-weight: 650; }}
+    .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+    label {{ display: grid; gap: .25rem; }}
+{extra}"""
+
+
 class Receiver(BaseHTTPRequestHandler):
     db_path: Path = DEFAULT_DB
     app_config: AppConfig = DEFAULT_APP_CONFIG
@@ -953,12 +1462,15 @@ class Receiver(BaseHTTPRequestHandler):
         try:
             raw_id = insert_payload(con, self.path, content_type, body, self.app_config)
             events: list[dict[str, Any]] = []
+            tool_events: list[dict[str, Any]] = []
             if content_type and "json" in content_type:
                 try:
                     events = extract_usage(self.path, body, self.app_config)
+                    tool_events = extract_tool_events(self.path, body, self.app_config)
                 except Exception as exc:  # Keep raw data even when parser lags schema changes.
                     sys.stderr.write(f"parse error for {self.path}: {exc}\n")
             insert_usage(con, raw_id, received_at, events)
+            insert_tool_events(con, raw_id, received_at, tool_events)
             con.commit()
             if events and self.app_config.server.endpoint and self.app_config.server.api_key:
                 _, _, sync_error = sync_pending_usage(con, self.app_config, limit=len(events))
@@ -980,6 +1492,7 @@ class Receiver(BaseHTTPRequestHandler):
                 shape=shape,
                 raw_body_retained=self.app_config.storage.raw_payload_body,
                 events=len(events),
+                tool_events=len(tool_events),
                 raw_id=raw_id,
             )
             + "\n"
@@ -990,6 +1503,32 @@ class Receiver(BaseHTTPRequestHandler):
 
 
 class ServerReceiver(BaseHTTPRequestHandler):
+    REPORT_GROUPS = (
+        "total",
+        "day",
+        "model",
+        "client",
+        "client-model",
+        "session",
+        "day-model",
+        "day-client",
+        "day-session",
+        "day-model-client",
+    )
+    TOOL_REPORT_GROUPS = (
+        "total",
+        "day",
+        "tool",
+        "client",
+        "client-tool",
+        "session",
+        "event",
+        "day-tool",
+        "day-client",
+        "day-session",
+        "day-tool-client",
+    )
+
     db_path: Path = DEFAULT_SERVER_DB
     app_config: AppConfig = DEFAULT_APP_CONFIG
 
@@ -1026,6 +1565,222 @@ class ServerReceiver(BaseHTTPRequestHandler):
         self.send_header("location", location)
         self.end_headers()
 
+    @staticmethod
+    def reports_args(query: dict[str, list[str]]) -> argparse.Namespace:
+        group_by = query.get("group_by", ["client-model"])[0]
+        if group_by not in ServerReceiver.REPORT_GROUPS:
+            group_by = "client-model"
+        try:
+            limit = int(query.get("limit", ["100"])[0])
+        except ValueError:
+            limit = 100
+        limit = min(max(limit, 1), 1000)
+        return argparse.Namespace(
+            group_by=group_by,
+            since=query.get("since", [None])[0] or None,
+            until=query.get("until", [None])[0] or None,
+            model=query.get("model", [None])[0] or None,
+            session_id=query.get("session_id", [None])[0] or None,
+            client_name=query.get("client_name", [None])[0] or None,
+            limit=limit,
+        )
+
+    @staticmethod
+    def tool_reports_args(query: dict[str, list[str]]) -> argparse.Namespace:
+        group_by = query.get("group_by", ["client-tool"])[0]
+        if group_by not in ServerReceiver.TOOL_REPORT_GROUPS:
+            group_by = "client-tool"
+        try:
+            limit = int(query.get("limit", ["100"])[0])
+        except ValueError:
+            limit = 100
+        limit = min(max(limit, 1), 1000)
+        return argparse.Namespace(
+            group_by=group_by,
+            since=query.get("since", [None])[0] or None,
+            until=query.get("until", [None])[0] or None,
+            tool_name=query.get("tool_name", [None])[0] or None,
+            session_id=query.get("session_id", [None])[0] or None,
+            client_name=query.get("client_name", [None])[0] or None,
+            event_name=query.get("event_name", ["codex.tool_result"])[0],
+            limit=limit,
+        )
+
+    def render_reports(self, con: sqlite3.Connection, query: dict[str, list[str]]) -> str:
+        args = ServerReceiver.reports_args(query)
+        stats = server_stats_dict(con)
+        rows = server_report_rows(con, args)
+        columns = server_default_columns(args.group_by)
+
+        group_options = "\n".join(
+            f'<option value="{html.escape(group)}"{" selected" if group == args.group_by else ""}>{html.escape(group)}</option>'
+            for group in ServerReceiver.REPORT_GROUPS
+        )
+        table_rows = []
+        for row in rows:
+            cells = []
+            for column in columns:
+                classes = ' class="num"' if column in NUMERIC_COLUMNS else ""
+                cells.append(f"<td{classes}>{html.escape(format_cell(column, row[column]))}</td>")
+            table_rows.append(f"<tr>{''.join(cells)}</tr>")
+        headers = "".join(f"<th>{html.escape(DISPLAY_NAMES.get(column, column))}</th>" for column in columns)
+        empty_row = f'<tr><td colspan="{len(columns)}">No matching usage events.</td></tr>'
+
+        def field(name: str) -> str:
+            value = getattr(args, name)
+            return html.escape(str(value or ""))
+
+        nav = server_nav("usage")
+        styles = server_page_styles()
+        return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>AI Usage Tracker Reports</title>
+  <style>{styles}</style>
+</head>
+<body>
+  {nav}
+  <main>
+    <h1>Usage Reports</h1>
+    <section class="summary">
+      <div><div class="label">Events</div><div class="value">{format_cell("events", stats["usage_events"])}</div></div>
+      <div><div class="label">Total tokens</div><div class="value">{format_cell("total_tokens", stats["total_tokens"])}</div></div>
+      <div><div class="label">Input</div><div class="value">{format_cell("input_tokens", stats["input_tokens"])}</div></div>
+      <div><div class="label">Output</div><div class="value">{format_cell("output_tokens", stats["output_tokens"])}</div></div>
+      <div><div class="label">Tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
+      <div><div class="label">Clients</div><div class="value">{format_cell("events", stats["configured_clients"])}</div></div>
+    </section>
+    <form method="get" action="/reports" class="filters">
+      <label>Group by <select name="group_by">{group_options}</select></label>
+      <label>Since <input name="since" value="{field("since")}" placeholder="YYYY-MM-DD"></label>
+      <label>Until <input name="until" value="{field("until")}" placeholder="YYYY-MM-DD"></label>
+      <label>Client <input name="client_name" value="{field("client_name")}"></label>
+      <label>Model <input name="model" value="{field("model")}"></label>
+      <label>Session <input name="session_id" value="{field("session_id")}"></label>
+      <label>Limit <input name="limit" type="number" min="1" max="1000" value="{args.limit}"></label>
+      <button type="submit">Apply</button>
+    </form>
+    <table>
+      <thead><tr>{headers}</tr></thead>
+      <tbody>{''.join(table_rows) or empty_row}</tbody>
+    </table>
+  </main>
+</body>
+</html>"""
+
+    def render_tool_reports(self, con: sqlite3.Connection, query: dict[str, list[str]]) -> str:
+        args = ServerReceiver.tool_reports_args(query)
+        stats = server_stats_dict(con)
+        tool_summary = server_tool_summary(con, args)
+        rows = server_tool_report_rows(con, args)
+        recent_rows = server_tool_recent_rows(con, args)
+        columns = server_tool_default_columns(args.group_by)
+        recent_columns = (
+            "source_received_at",
+            "client_name",
+            "tool_name",
+            "success",
+            "duration_ms",
+            "decision",
+            "source",
+            "mcp_server",
+            "session_id",
+            "call_id",
+        )
+
+        group_options = "\n".join(
+            f'<option value="{html.escape(group)}"{" selected" if group == args.group_by else ""}>{html.escape(group)}</option>'
+            for group in ServerReceiver.TOOL_REPORT_GROUPS
+        )
+        table_rows = []
+        for row in rows:
+            cells = []
+            for column in columns:
+                classes = ' class="num"' if column in NUMERIC_COLUMNS else ""
+                cells.append(f"<td{classes}>{html.escape(format_cell(column, row[column]))}</td>")
+            table_rows.append(f"<tr>{''.join(cells)}</tr>")
+        headers = "".join(f"<th>{html.escape(DISPLAY_NAMES.get(column, column))}</th>" for column in columns)
+        empty_row = f'<tr><td colspan="{len(columns)}">No matching tool events.</td></tr>'
+        recent_table_rows = []
+        for row in recent_rows:
+            cells = []
+            for column in recent_columns:
+                value = format_cell(column, row[column])
+                if column == "success":
+                    status_class = "ok" if row[column] == "true" else "fail" if row[column] == "false" else "neutral"
+                    value = "ok" if row[column] == "true" else "fail" if row[column] == "false" else ""
+                    cells.append(f'<td><span class="status {status_class}">{html.escape(value)}</span></td>')
+                    continue
+                classes = ' class="num"' if column in NUMERIC_COLUMNS else ""
+                cells.append(f"<td{classes}>{html.escape(value)}</td>")
+            recent_table_rows.append(f"<tr>{''.join(cells)}</tr>")
+        recent_headers = "".join(
+            f"<th>{html.escape(DISPLAY_NAMES.get(column, column))}</th>" for column in recent_columns
+        )
+        recent_empty_row = f'<tr><td colspan="{len(recent_columns)}">No matching tool calls.</td></tr>'
+
+        def field(name: str) -> str:
+            value = getattr(args, name)
+            return html.escape(str(value or ""))
+
+        nav = server_nav("tools")
+        styles = server_page_styles(tools=True)
+        return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>AI Usage Tracker Tool Reports</title>
+  <style>{styles}</style>
+</head>
+<body>
+  {nav}
+  <main>
+    <header>
+      <h1>Tool Reports</h1>
+      <div class="quick-links">
+        <a href="/tools?group_by=client-tool">By client/tool</a>
+        <a href="/tools?group_by=day-tool">By day/tool</a>
+        <a href="/tools?group_by=event&event_name=">Decisions and results</a>
+      </div>
+    </header>
+    <section class="summary">
+      <div><div class="label">Matching events</div><div class="value">{format_cell("tool_events", tool_summary["tool_events"])}</div></div>
+      <div><div class="label">Successes</div><div class="value">{format_cell("successes", tool_summary["successes"])}</div></div>
+      <div><div class="label">Failures</div><div class="value">{format_cell("failures", tool_summary["failures"])}</div></div>
+      <div><div class="label">Duration</div><div class="value">{format_cell("total_duration_ms", tool_summary["total_duration_ms"])}</div></div>
+      <div><div class="label">Avg duration</div><div class="value">{format_cell("avg_duration_ms", tool_summary["avg_duration_ms"])}</div></div>
+      <div><div class="label">All tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
+    </section>
+    <form method="get" action="/tools" class="filters">
+      <label>Group by <select name="group_by">{group_options}</select></label>
+      <label>Since <input name="since" value="{field("since")}" placeholder="YYYY-MM-DD"></label>
+      <label>Until <input name="until" value="{field("until")}" placeholder="YYYY-MM-DD"></label>
+      <label>Client <input name="client_name" value="{field("client_name")}"></label>
+      <label>Tool <input name="tool_name" value="{field("tool_name")}"></label>
+      <label>Event <input name="event_name" value="{field("event_name")}"></label>
+      <label>Session <input name="session_id" value="{field("session_id")}"></label>
+      <label>Limit <input name="limit" type="number" min="1" max="1000" value="{args.limit}"></label>
+      <button type="submit">Apply</button>
+    </form>
+    <section class="panel">
+      <div class="panel-head"><h2>Grouped totals</h2></div>
+      <table>
+        <thead><tr>{headers}</tr></thead>
+        <tbody>{''.join(table_rows) or empty_row}</tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Recent tool calls</h2></div>
+      <table>
+        <thead><tr>{recent_headers}</tr></thead>
+        <tbody>{''.join(recent_table_rows) or recent_empty_row}</tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>"""
+
     def render_admin(self, con: sqlite3.Connection, *, message: str | None = None, token: str | None = None) -> str:
         clients = con.execute(
             """
@@ -1051,6 +1806,16 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 </form>
                 """
             )
+            delete_button = (
+                f"""
+                <form method="post" action="/admin/clients/delete" class="inline">
+                  <input type="hidden" name="client_name" value="{client_name}">
+                  <button type="submit">Delete</button>
+                </form>
+                """
+                if client["revoked_at"]
+                else ""
+            )
             rows.append(
                 f"""
                 <tr>
@@ -1067,7 +1832,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
                   <td>{html.escape(client["updated_at"])}</td>
                   <td>{last_seen}</td>
                   <td>{revoked}</td>
-                  <td>{revoke_button}</td>
+                  <td>{revoke_button}{delete_button}</td>
                 </tr>
                 """
             )
@@ -1080,55 +1845,59 @@ class ServerReceiver(BaseHTTPRequestHandler):
             </section>
             """
         message_block = f"<section class=\"notice\">{html.escape(message)}</section>" if message else ""
+        nav = server_nav("admin")
+        styles = server_page_styles(admin=True)
         return f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>AI Usage Tracker Admin</title>
-  <style>
-    body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #17202a; }}
-    table {{ border-collapse: collapse; width: 100%; margin-top: 1rem; }}
-    th, td {{ border-bottom: 1px solid #d7dde3; padding: .5rem; text-align: left; vertical-align: top; }}
-    input {{ padding: .35rem; }}
-    button {{ padding: .35rem .6rem; }}
-    code {{ display: block; padding: .75rem; background: #f3f5f7; margin-top: .5rem; word-break: break-all; }}
-    .notice {{ padding: .75rem; background: #eef6ff; border: 1px solid #b9d7f2; margin: 1rem 0; }}
-    .inline {{ display: inline; }}
-    .create {{ display: flex; gap: .5rem; align-items: end; margin-top: 1rem; }}
-    label {{ display: grid; gap: .25rem; }}
-  </style>
+  <style>{styles}</style>
 </head>
 <body>
-  <h1>AI Usage Tracker Admin</h1>
-  {message_block}
-  {token_block}
-  <h2>Create Client Token</h2>
-  <form method="post" action="/admin/clients/create" class="create">
-    <label>Client name <input name="client_name" required pattern="[A-Za-z0-9_.-]+"></label>
-    <label>Display name <input name="display_name"></label>
-    <button type="submit">Create token</button>
-  </form>
-  <h2>Clients</h2>
-  <table>
-    <thead>
-      <tr><th>Client</th><th>Display name</th><th>Status</th><th>Created</th><th>Updated</th><th>Last seen</th><th>Revoked</th><th>Actions</th></tr>
-    </thead>
-    <tbody>{''.join(rows) or '<tr><td colspan="8">No clients yet.</td></tr>'}</tbody>
-  </table>
+  {nav}
+  <main>
+    <h1>AI Usage Tracker Admin</h1>
+    {message_block}
+    {token_block}
+    <section class="panel">
+      <h2>Create Client Token</h2>
+      <form method="post" action="/admin/clients/create" class="filters">
+        <label>Client name <input name="client_name" required pattern="[A-Za-z0-9_.-]+"></label>
+        <label>Display name <input name="display_name"></label>
+        <button type="submit">Create token</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Clients</h2>
+      <table>
+        <thead>
+          <tr><th>Client</th><th>Display name</th><th>Status</th><th>Created</th><th>Updated</th><th>Last seen</th><th>Revoked</th><th>Actions</th></tr>
+        </thead>
+        <tbody>{''.join(rows) or '<tr><td colspan="8">No clients yet.</td></tr>'}</tbody>
+      </table>
+    </section>
+  </main>
 </body>
 </html>"""
 
     def do_GET(self) -> None:
         parsed = parse.urlparse(self.path)
         if parsed.path in ("", "/"):
-            self.redirect("/admin")
+            self.redirect("/reports")
             return
+        query = parse.parse_qs(parsed.query, keep_blank_values=True)
         con = connect_server(self.db_path)
         try:
             if parsed.path == "/admin":
-                query = parse.parse_qs(parsed.query)
                 message = query.get("message", [None])[0]
                 self.send_html(200, self.render_admin(con, message=message))
+                return
+            if parsed.path == "/reports":
+                self.send_html(200, self.render_reports(con, query))
+                return
+            if parsed.path == "/tools":
+                self.send_html(200, self.render_tool_reports(con, query))
                 return
             if parsed.path == "/api/v1/stats":
                 if not require_admin(self.app_config, self.headers):
@@ -1140,17 +1909,16 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 if not require_admin(self.app_config, self.headers):
                     self.send_json(401, {"error": "admin authorization required"})
                     return
-                query = parse.parse_qs(parsed.query)
-                args = argparse.Namespace(
-                    group_by=query.get("group_by", ["day-model-client"])[0],
-                    since=query.get("since", [None])[0],
-                    until=query.get("until", [None])[0],
-                    model=query.get("model", [None])[0],
-                    session_id=query.get("session_id", [None])[0],
-                    client_name=query.get("client_name", [None])[0],
-                    limit=int(query.get("limit", ["100"])[0]),
-                )
+                args = self.reports_args(query)
                 rows = [dict(row) for row in server_report_rows(con, args)]
+                self.send_json(200, {"rows": rows})
+                return
+            if parsed.path == "/api/v1/reports/tools":
+                if not require_admin(self.app_config, self.headers):
+                    self.send_json(401, {"error": "admin authorization required"})
+                    return
+                args = self.tool_reports_args(query)
+                rows = [dict(row) for row in server_tool_report_rows(con, args)]
                 self.send_json(200, {"rows": rows})
                 return
             self.send_json(404, {"error": "not found"})
@@ -1171,9 +1939,22 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 if not isinstance(events, list):
                     self.send_json(400, {"error": "events must be a list"})
                     return
+                tool_events = payload.get("tool_events", [])
+                if not isinstance(tool_events, list):
+                    self.send_json(400, {"error": "tool_events must be a list"})
+                    return
                 accepted, duplicates = ingest_usage_events(con, client_name, events)
+                accepted_tool_events, duplicate_tool_events = ingest_tool_events(con, client_name, tool_events)
                 con.commit()
-                self.send_json(200, {"accepted": accepted, "duplicates": duplicates})
+                self.send_json(
+                    200,
+                    {
+                        "accepted": accepted,
+                        "duplicates": duplicates,
+                        "accepted_tool_events": accepted_tool_events,
+                        "duplicate_tool_events": duplicate_tool_events,
+                    },
+                )
                 return
             if parsed.path == "/admin/clients/create":
                 form = self.read_form()
@@ -1202,6 +1983,13 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 con.commit()
                 self.redirect("/admin?message=Client%20revoked")
                 return
+            if parsed.path == "/admin/clients/delete":
+                form = self.read_form()
+                deleted = delete_revoked_client(con, form.get("client_name", ""))
+                con.commit()
+                message = "Revoked%20client%20deleted" if deleted else "Only%20revoked%20clients%20can%20be%20deleted"
+                self.redirect(f"/admin?message={message}")
+                return
             self.send_json(404, {"error": "not found"})
         finally:
             con.close()
@@ -1220,7 +2008,17 @@ def serve(args: argparse.Namespace) -> None:
         raise SystemExit(2)
     Receiver.db_path = Path(args.db)
     Receiver.app_config = load_config(Path(args.config))
-    connect(Receiver.db_path).close()
+    con = connect(Receiver.db_path)
+    try:
+        if Receiver.app_config.server.endpoint and Receiver.app_config.server.api_key:
+            attempted, synced, sync_error = sync_all_pending_usage(con, Receiver.app_config)
+            con.commit()
+            if attempted:
+                print(f"Startup sync sent {synced}/{attempted} usage events.", flush=True)
+            if sync_error:
+                print(f"Startup sync error: {sync_error}", file=sys.stderr, flush=True)
+    finally:
+        con.close()
     server = ThreadingHTTPServer((args.host, args.port), Receiver)
     print(f"Listening on http://{args.host}:{args.port}; db={Receiver.db_path}", flush=True)
     try:
@@ -1323,6 +2121,7 @@ def stats(args: argparse.Namespace) -> None:
     try:
         raw_count = con.execute("select count(*) from raw_payloads").fetchone()[0]
         event_count = con.execute("select count(*) from usage_events").fetchone()[0]
+        tool_event_count = con.execute("select count(*) from tool_events").fetchone()[0]
         totals = con.execute(
             """
             select
@@ -1339,6 +2138,7 @@ def stats(args: argparse.Namespace) -> None:
         print(f"db: {Path(args.db)}")
         print(f"raw_payloads: {raw_count}")
         print(f"usage_events: {event_count}")
+        print(f"tool_events: {tool_event_count}")
         for key in (
             "input_tokens",
             "output_tokens",
@@ -1353,9 +2153,10 @@ def stats(args: argparse.Namespace) -> None:
         con.close()
 
 
-def reindex_database(con: sqlite3.Connection, config: AppConfig, *, keep_existing: bool = False) -> tuple[int, int]:
+def reindex_database(con: sqlite3.Connection, config: AppConfig, *, keep_existing: bool = False) -> tuple[int, int, int]:
     if not keep_existing:
         con.execute("delete from usage_events")
+        con.execute("delete from tool_events")
     rows = con.execute(
         """
         select id, received_at, path, content_type, body
@@ -1364,6 +2165,7 @@ def reindex_database(con: sqlite3.Connection, config: AppConfig, *, keep_existin
         """
     ).fetchall()
     inserted = 0
+    inserted_tool_events = 0
     for row in rows:
         content_type = row["content_type"] or ""
         body = bytes(row["body"])
@@ -1371,12 +2173,15 @@ def reindex_database(con: sqlite3.Connection, config: AppConfig, *, keep_existin
             continue
         try:
             events = extract_usage(row["path"], body, config)
+            tool_events = extract_tool_events(row["path"], body, config)
         except Exception as exc:
             sys.stderr.write(f"parse error for raw payload {row['id']}: {exc}\n")
             continue
         insert_usage(con, row["id"], row["received_at"], events)
+        insert_tool_events(con, row["id"], row["received_at"], tool_events)
         inserted += len(events)
-    return len(rows), inserted
+        inserted_tool_events += len(tool_events)
+    return len(rows), inserted, inserted_tool_events
 
 
 def event_from_stored_row(row: sqlite3.Row, config: AppConfig) -> dict[str, Any]:
@@ -1418,6 +2223,48 @@ def usage_events_without_reindexable_raw(
     return [(row["raw_payload_id"], row["received_at"], event_from_stored_row(row, config)) for row in rows]
 
 
+def tool_event_from_stored_row(row: sqlite3.Row, config: AppConfig) -> dict[str, Any]:
+    attrs: dict[str, Any] = {}
+    try:
+        loaded_attrs = json.loads(row["attributes_json"])
+        if isinstance(loaded_attrs, dict):
+            attrs = loaded_attrs
+    except json.JSONDecodeError:
+        attrs = {}
+    return {
+        "client_tool_event_id": row["client_tool_event_id"],
+        "signal": row["signal"],
+        "event_name": row["event_name"],
+        "model": row["model"] if config.storage.model else None,
+        "session_id": row["session_id"] if config.storage.session_id else None,
+        "thread_id": row["thread_id"] if config.storage.thread_id else None,
+        "tool_name": row["tool_name"],
+        "call_id": row["call_id"],
+        "decision": row["decision"],
+        "source": row["source"],
+        "success": row["success"],
+        "duration_ms": row["duration_ms"],
+        "mcp_server": row["mcp_server"],
+        "attributes_json": stored_tool_attributes_json(attrs, config),
+    }
+
+
+def tool_events_without_reindexable_raw(
+    con: sqlite3.Connection,
+    config: AppConfig,
+) -> list[tuple[int, str, dict[str, Any]]]:
+    rows = con.execute(
+        """
+        select tool_events.*
+        from tool_events
+        join raw_payloads on raw_payloads.id = tool_events.raw_payload_id
+        where length(raw_payloads.body) = 0 or coalesce(raw_payloads.content_type, '') not like '%json%'
+        order by tool_events.id
+        """
+    ).fetchall()
+    return [(row["raw_payload_id"], row["received_at"], tool_event_from_stored_row(row, config)) for row in rows]
+
+
 def cleanup_stored_data(con: sqlite3.Connection, config: AppConfig) -> int:
     cleared_payloads = 0
     if not config.storage.raw_payload_body:
@@ -1444,20 +2291,76 @@ def usage_event_to_payload(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def pending_sync_rows(con: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+def tool_event_to_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "client_tool_event_id": row["client_tool_event_id"],
+        "received_at": row["received_at"],
+        "signal": row["signal"],
+        "event_name": row["event_name"],
+        "model": row["model"],
+        "session_id": row["session_id"],
+        "thread_id": row["thread_id"],
+        "tool_name": row["tool_name"],
+        "call_id": row["call_id"],
+        "decision": row["decision"],
+        "source": row["source"],
+        "success": row["success"],
+        "duration_ms": row["duration_ms"],
+        "mcp_server": row["mcp_server"],
+        "attributes_json": row["attributes_json"],
+    }
+
+
+def sync_server_key(config: AppConfig) -> str:
+    if not config.server.endpoint or not config.server.api_key:
+        raise ValueError("server.endpoint and server.api_key are required for sync")
+    material = "\n".join(
+        (
+            config.client_name,
+            config.server.endpoint.rstrip("/"),
+            config.server.api_key,
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def pending_sync_rows(con: sqlite3.Connection, config: AppConfig, limit: int) -> list[sqlite3.Row]:
+    target_key = sync_server_key(config)
     return con.execute(
         """
         select *
         from usage_events
         where synced_at is null
+           or synced_server_key is null
+           or synced_server_key != ?
         order by id
         limit ?
         """,
-        (limit,),
+        (target_key, limit),
     ).fetchall()
 
 
-def post_usage_batch(config: AppConfig, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
+def pending_tool_sync_rows(con: sqlite3.Connection, config: AppConfig, limit: int) -> list[sqlite3.Row]:
+    target_key = sync_server_key(config)
+    return con.execute(
+        """
+        select *
+        from tool_events
+        where synced_at is null
+           or synced_server_key is null
+           or synced_server_key != ?
+        order by id
+        limit ?
+        """,
+        (target_key, limit),
+    ).fetchall()
+
+
+def post_usage_batch(
+    config: AppConfig,
+    rows: Sequence[sqlite3.Row],
+    tool_rows: Sequence[sqlite3.Row] = (),
+) -> dict[str, Any]:
     if not config.server.endpoint or not config.server.api_key:
         raise ValueError("server.endpoint and server.api_key are required for sync")
     url = config.server.endpoint.rstrip("/") + "/api/v1/usage-events"
@@ -1465,6 +2368,7 @@ def post_usage_batch(config: AppConfig, rows: Sequence[sqlite3.Row]) -> dict[str
         "client_name": config.client_name,
         "sent_at": now_iso(),
         "events": [usage_event_to_payload(row) for row in rows],
+        "tool_events": [tool_event_to_payload(row) for row in tool_rows],
     }
     req = request.Request(
         url,
@@ -1481,49 +2385,110 @@ def post_usage_batch(config: AppConfig, rows: Sequence[sqlite3.Row]) -> dict[str
 
 def sync_pending_usage(con: sqlite3.Connection, config: AppConfig, *, limit: int | None = None) -> tuple[int, int, str | None]:
     batch_limit = limit or config.server.batch_size
-    rows = pending_sync_rows(con, batch_limit)
-    if not rows:
+    rows = pending_sync_rows(con, config, batch_limit)
+    tool_rows = pending_tool_sync_rows(con, config, batch_limit)
+    if not rows and not tool_rows:
         return 0, 0, None
     ids = [row["id"] for row in rows]
+    tool_ids = [row["id"] for row in tool_rows]
     try:
-        result = post_usage_batch(config, rows)
+        result = post_usage_batch(config, rows, tool_rows)
     except (OSError, ValueError, urlerror.URLError, urlerror.HTTPError) as exc:
         message = str(exc)
+        if ids:
+            con.executemany(
+                """
+                update usage_events
+                set sync_attempts = coalesce(sync_attempts, 0) + 1,
+                    last_sync_error = ?
+                where id = ?
+                """,
+                [(message, row_id) for row_id in ids],
+            )
+        if tool_ids:
+            con.executemany(
+                """
+                update tool_events
+                set sync_attempts = coalesce(sync_attempts, 0) + 1,
+                    last_sync_error = ?
+                where id = ?
+                """,
+                [(message, row_id) for row_id in tool_ids],
+            )
+        return len(rows) + len(tool_rows), 0, message
+    synced_at = now_iso()
+    target_key = sync_server_key(config)
+    tool_acknowledged = "accepted_tool_events" in result or "duplicate_tool_events" in result
+    if ids:
         con.executemany(
             """
             update usage_events
+            set synced_at = ?,
+                synced_server_key = ?,
+                last_sync_error = null
+            where id = ?
+            """,
+            [(synced_at, target_key, row_id) for row_id in ids],
+        )
+    if tool_ids and tool_acknowledged:
+        con.executemany(
+            """
+            update tool_events
+            set synced_at = ?,
+                synced_server_key = ?,
+                last_sync_error = null
+            where id = ?
+            """,
+            [(synced_at, target_key, row_id) for row_id in tool_ids],
+        )
+    elif tool_ids:
+        message = "server did not acknowledge tool_events"
+        con.executemany(
+            """
+            update tool_events
             set sync_attempts = coalesce(sync_attempts, 0) + 1,
                 last_sync_error = ?
             where id = ?
             """,
-            [(message, row_id) for row_id in ids],
+            [(message, row_id) for row_id in tool_ids],
         )
-        return len(rows), 0, message
-    synced_at = now_iso()
-    con.executemany(
-        """
-        update usage_events
-        set synced_at = ?,
-            last_sync_error = null
-        where id = ?
-        """,
-        [(synced_at, row_id) for row_id in ids],
+        synced = int(result.get("accepted", len(rows))) + int(result.get("duplicates", 0))
+        return len(rows) + len(tool_rows), synced, message
+    synced = (
+        int(result.get("accepted", len(rows)))
+        + int(result.get("duplicates", 0))
+        + int(result.get("accepted_tool_events", len(tool_rows)))
+        + int(result.get("duplicate_tool_events", 0))
     )
-    return len(rows), int(result.get("accepted", len(rows))) + int(result.get("duplicates", 0)), None
+    return len(rows) + len(tool_rows), synced, None
+
+
+def sync_all_pending_usage(con: sqlite3.Connection, config: AppConfig) -> tuple[int, int, str | None]:
+    total_attempted = 0
+    total_synced = 0
+    while True:
+        attempted, synced, error = sync_pending_usage(con, config)
+        total_attempted += attempted
+        total_synced += synced
+        if error or attempted == 0:
+            return total_attempted, total_synced, error
 
 
 def sync(args: argparse.Namespace) -> None:
     config = load_config(Path(args.config))
     con = connect(Path(args.db))
     try:
-        attempted, synced, error = sync_pending_usage(con, config, limit=args.limit)
+        if args.limit:
+            attempted, synced, error = sync_pending_usage(con, config, limit=args.limit)
+        else:
+            attempted, synced, error = sync_all_pending_usage(con, config)
         con.commit()
     finally:
         con.close()
     if error:
         print(f"Sync failed for {attempted} events: {error}", file=sys.stderr)
         raise SystemExit(1)
-    print(f"Synced {synced} usage events.")
+    print(f"Synced {synced} events.")
 
 
 def hash_token(token: str) -> str:
@@ -1560,6 +2525,14 @@ def revoke_client(con: sqlite3.Connection, client_name: str) -> None:
         "update clients set revoked_at = coalesce(revoked_at, ?), updated_at = ? where client_name = ?",
         (now, now, client_name),
     )
+
+
+def delete_revoked_client(con: sqlite3.Connection, client_name: str) -> bool:
+    cursor = con.execute(
+        "delete from clients where client_name = ? and revoked_at is not null",
+        (client_name,),
+    )
+    return cursor.rowcount > 0
 
 
 def bearer_token(headers: Any) -> str | None:
@@ -1627,26 +2600,95 @@ def ingest_usage_events(con: sqlite3.Connection, client_name: str, events: Seque
     return accepted, duplicates
 
 
+def ingest_tool_events(con: sqlite3.Connection, client_name: str, events: Sequence[dict[str, Any]]) -> tuple[int, int]:
+    accepted = 0
+    duplicates = 0
+    received_at = now_iso()
+    for event in events:
+        try:
+            con.execute(
+                """
+                insert into tool_events(
+                    client_name, client_tool_event_id, received_at, source_received_at, signal, event_name,
+                    model, session_id, thread_id, tool_name, call_id, decision, source, success,
+                    duration_ms, mcp_server, attributes_json
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    client_name,
+                    str(event["client_tool_event_id"]),
+                    received_at,
+                    str(event.get("received_at") or received_at),
+                    str(event.get("signal") or "logs"),
+                    str(event.get("event_name") or "codex.tool_result"),
+                    event.get("model"),
+                    event.get("session_id"),
+                    event.get("thread_id"),
+                    str(event.get("tool_name") or "(unknown)"),
+                    event.get("call_id"),
+                    event.get("decision"),
+                    event.get("source"),
+                    event.get("success"),
+                    int(event["duration_ms"]) if event.get("duration_ms") not in (None, "") else None,
+                    event.get("mcp_server"),
+                    str(event.get("attributes_json") or "{}"),
+                ),
+            )
+            accepted += 1
+        except sqlite3.IntegrityError:
+            duplicates += 1
+    if events:
+        con.execute("update clients set last_seen_at = ?, updated_at = ? where client_name = ?", (received_at, received_at, client_name))
+    return accepted, duplicates
+
+
 def server_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
     clauses = []
     params: list[Any] = []
     since = parse_datetime_filter(getattr(args, "since", None))
     until = parse_datetime_filter(getattr(args, "until", None), end_of_day=True)
     if since:
-        clauses.append("source_received_at >= ?")
+        clauses.append("usage_events.source_received_at >= ?")
         params.append(since)
     if until:
-        clauses.append("source_received_at <= ?")
+        clauses.append("usage_events.source_received_at <= ?")
         params.append(until)
     if getattr(args, "model", None):
-        clauses.append("model = ?")
+        clauses.append("usage_events.model = ?")
         params.append(args.model)
     if getattr(args, "session_id", None):
-        clauses.append("session_id = ?")
+        clauses.append("usage_events.session_id = ?")
         params.append(args.session_id)
     if getattr(args, "client_name", None):
-        clauses.append("client_name = ?")
+        clauses.append("usage_events.client_name = ?")
         params.append(args.client_name)
+    return ("where " + " and ".join(clauses), params) if clauses else ("", params)
+
+
+def server_tool_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
+    clauses = []
+    params: list[Any] = []
+    since = parse_datetime_filter(getattr(args, "since", None))
+    until = parse_datetime_filter(getattr(args, "until", None), end_of_day=True)
+    if since:
+        clauses.append("tool_events.source_received_at >= ?")
+        params.append(since)
+    if until:
+        clauses.append("tool_events.source_received_at <= ?")
+        params.append(until)
+    if getattr(args, "tool_name", None):
+        clauses.append("tool_events.tool_name = ?")
+        params.append(args.tool_name)
+    if getattr(args, "session_id", None):
+        clauses.append("tool_events.session_id = ?")
+        params.append(args.session_id)
+    if getattr(args, "client_name", None):
+        clauses.append("tool_events.client_name = ?")
+        params.append(args.client_name)
+    if getattr(args, "event_name", None):
+        clauses.append("tool_events.event_name = ?")
+        params.append(args.event_name)
     return ("where " + " and ".join(clauses), params) if clauses else ("", params)
 
 
@@ -1656,14 +2698,33 @@ def server_group_expressions(group_by: str) -> tuple[str, str, str, str]:
     model_expr = "''"
     session_expr = "''"
     if group_by in ("day", "day-model", "day-session", "day-client", "day-model-client"):
-        period_expr = "substr(source_received_at, 1, 10)"
-    if group_by in ("client", "day-client", "day-model-client"):
-        client_expr = "coalesce(client_name, '(unknown)')"
-    if group_by in ("model", "day-model", "day-model-client"):
+        period_expr = "substr(usage_events.source_received_at, 1, 10)"
+    if group_by in ("client", "client-model", "day-client", "day-model-client"):
+        client_expr = "coalesce(clients.display_name, usage_events.client_name, '(unknown)')"
+    if group_by in ("model", "client-model", "day-model", "day-model-client"):
         model_expr = "coalesce(model, '(unknown)')"
     if group_by in ("session", "day-session"):
         session_expr = "coalesce(session_id, '(unknown)')"
     return period_expr, client_expr, model_expr, session_expr
+
+
+def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, str]:
+    period_expr = "''"
+    client_expr = "''"
+    tool_expr = "''"
+    session_expr = "''"
+    event_expr = "''"
+    if group_by in ("day", "day-tool", "day-session", "day-client", "day-tool-client"):
+        period_expr = "substr(tool_events.source_received_at, 1, 10)"
+    if group_by in ("client", "client-tool", "day-client", "day-tool-client"):
+        client_expr = "coalesce(clients.display_name, tool_events.client_name, '(unknown)')"
+    if group_by in ("tool", "client-tool", "day-tool", "day-tool-client"):
+        tool_expr = "coalesce(tool_name, '(unknown)')"
+    if group_by in ("session", "day-session"):
+        session_expr = "coalesce(session_id, '(unknown)')"
+    if group_by == "event":
+        event_expr = "event_name"
+    return period_expr, client_expr, tool_expr, session_expr, event_expr
 
 
 def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
@@ -1672,7 +2733,7 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
     order_by = "last_seen desc"
     if args.group_by.startswith("day"):
         order_by = "period desc, total_tokens desc"
-    elif args.group_by in ("model", "session", "client"):
+    elif args.group_by in ("model", "session", "client", "client-model"):
         order_by = "total_tokens desc"
     query = f"""
         select
@@ -1681,20 +2742,95 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
             {model_expr} as model,
             {session_expr} as session_id,
             count(*) as events,
-            coalesce(sum(input_tokens), 0) as input_tokens,
-            coalesce(sum(output_tokens), 0) as output_tokens,
-            coalesce(sum(total_tokens), 0) as total_tokens,
-            coalesce(sum(cached_tokens), 0) as cached_tokens,
-            coalesce(sum(reasoning_tokens), 0) as reasoning_tokens,
-            min(source_received_at) as first_seen,
-            max(source_received_at) as last_seen
+            coalesce(sum(usage_events.input_tokens), 0) as input_tokens,
+            coalesce(sum(usage_events.output_tokens), 0) as output_tokens,
+            coalesce(sum(usage_events.total_tokens), 0) as total_tokens,
+            coalesce(sum(usage_events.cached_tokens), 0) as cached_tokens,
+            coalesce(sum(usage_events.reasoning_tokens), 0) as reasoning_tokens,
+            min(usage_events.source_received_at) as first_seen,
+            max(usage_events.source_received_at) as last_seen
         from usage_events
+        left join clients on clients.client_name = usage_events.client_name
         {where}
         group by 1, 2, 3, 4
         order by {order_by}
         limit ?
     """
     return con.execute(query, (*params, args.limit)).fetchall()
+
+
+def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
+    period_expr, client_expr, tool_expr, session_expr, event_expr = server_tool_group_expressions(args.group_by)
+    where, params = server_tool_where_clause(args)
+    order_by = "last_seen desc"
+    if args.group_by.startswith("day"):
+        order_by = "period desc, tool_events desc"
+    elif args.group_by in ("tool", "session", "event", "client", "client-tool"):
+        order_by = "tool_events desc"
+    query = f"""
+        select
+            {period_expr} as period,
+            {client_expr} as client_name,
+            {tool_expr} as tool_name,
+            {session_expr} as session_id,
+            {event_expr} as event_name,
+            count(*) as tool_events,
+            coalesce(sum(case when tool_events.success = 'true' then 1 else 0 end), 0) as successes,
+            coalesce(sum(case when tool_events.success = 'false' then 1 else 0 end), 0) as failures,
+            coalesce(sum(tool_events.duration_ms), 0) as total_duration_ms,
+            coalesce(round(avg(tool_events.duration_ms)), 0) as avg_duration_ms,
+            min(tool_events.source_received_at) as first_seen,
+            max(tool_events.source_received_at) as last_seen
+        from tool_events
+        left join clients on clients.client_name = tool_events.client_name
+        {where}
+        group by 1, 2, 3, 4, 5
+        order by {order_by}
+        limit ?
+    """
+    return con.execute(query, (*params, args.limit)).fetchall()
+
+
+def server_tool_recent_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
+    where, params = server_tool_where_clause(args)
+    query = f"""
+        select
+            tool_events.source_received_at,
+            coalesce(clients.display_name, tool_events.client_name, '(unknown)') as client_name,
+            tool_events.tool_name,
+            tool_events.event_name,
+            tool_events.success,
+            tool_events.duration_ms,
+            tool_events.decision,
+            tool_events.source,
+            tool_events.mcp_server,
+            tool_events.session_id,
+            tool_events.call_id
+        from tool_events
+        left join clients on clients.client_name = tool_events.client_name
+        {where}
+        order by tool_events.source_received_at desc, tool_events.id desc
+        limit ?
+    """
+    return con.execute(query, (*params, args.limit)).fetchall()
+
+
+def server_tool_summary(con: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.Row:
+    where, params = server_tool_where_clause(args)
+    query = f"""
+        select
+            count(*) as tool_events,
+            coalesce(sum(case when tool_events.success = 'true' then 1 else 0 end), 0) as successes,
+            coalesce(sum(case when tool_events.success = 'false' then 1 else 0 end), 0) as failures,
+            coalesce(sum(tool_events.duration_ms), 0) as total_duration_ms,
+            coalesce(round(avg(tool_events.duration_ms)), 0) as avg_duration_ms,
+            min(tool_events.source_received_at) as first_seen,
+            max(tool_events.source_received_at) as last_seen
+        from tool_events
+        left join clients on clients.client_name = tool_events.client_name
+        {where}
+    """
+    return con.execute(query, params).fetchone()
 
 
 def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
@@ -1714,8 +2850,10 @@ def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
         """
     ).fetchone()
     clients = con.execute("select count(*) from clients where revoked_at is null").fetchone()[0]
+    tool_events = con.execute("select count(*) from tool_events").fetchone()[0]
     out = dict(totals)
     out["configured_clients"] = clients
+    out["tool_events"] = tool_events
     return out
 
 
@@ -1723,9 +2861,12 @@ def reindex(args: argparse.Namespace) -> None:
     con = connect(Path(args.db))
     config = load_config(Path(args.config))
     try:
-        raw_count, inserted = reindex_database(con, config, keep_existing=args.keep_existing)
+        raw_count, inserted, inserted_tool_events = reindex_database(con, config, keep_existing=args.keep_existing)
         con.commit()
-        print(f"Reindexed {raw_count} raw payloads; inserted {inserted} usage events.")
+        print(
+            f"Reindexed {raw_count} raw payloads; inserted {inserted} usage events "
+            f"and {inserted_tool_events} tool events."
+        )
     finally:
         con.close()
 
@@ -1735,14 +2876,19 @@ def cleanup(args: argparse.Namespace) -> None:
     config = load_config(Path(args.config))
     try:
         preserved_events = usage_events_without_reindexable_raw(con, config)
-        raw_count, inserted = reindex_database(con, config)
+        preserved_tool_events = tool_events_without_reindexable_raw(con, config)
+        raw_count, inserted, inserted_tool_events = reindex_database(con, config)
         for raw_id, received_at, event in preserved_events:
             insert_usage(con, raw_id, received_at, [event])
+        for raw_id, received_at, event in preserved_tool_events:
+            insert_tool_events(con, raw_id, received_at, [event])
         cleared_payloads = cleanup_stored_data(con, config)
         con.commit()
         print(
-            f"Reindexed {raw_count} raw payloads; inserted {inserted} usage events; "
-            f"preserved {len(preserved_events)} existing usage events without raw bodies."
+            f"Reindexed {raw_count} raw payloads; inserted {inserted} usage events "
+            f"and {inserted_tool_events} tool events; "
+            f"preserved {len(preserved_events)} existing usage events and "
+            f"{len(preserved_tool_events)} tool events without raw bodies."
         )
         if config.storage.raw_payload_body:
             print("Raw payload bodies kept because storage.raw_payload_body is true.")
@@ -1804,6 +2950,21 @@ def report(args: argparse.Namespace) -> None:
     summary(args)
 
 
+def tools_report(args: argparse.Namespace) -> None:
+    con = connect(Path(args.db))
+    try:
+        rows = tool_report_rows(con, args)
+        if args.format == "json":
+            columns = tool_default_columns(args.group_by)
+            print(json.dumps([{column: row[column] for column in columns} for row in rows], indent=2))
+        elif args.format == "csv":
+            write_csv(rows, sys.stdout, tool_default_columns(args.group_by))
+        else:
+            print_table(rows, tool_default_columns(args.group_by))
+    finally:
+        con.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default=str(DEFAULT_DB))
@@ -1831,6 +2992,18 @@ def main() -> int:
     add_report_filters(p_report)
     add_report_output(p_report)
     p_report.set_defaults(func=report)
+
+    p_tools_report = sub.add_parser("tools-report", parents=[db_parent], help="Grouped Codex tool usage report")
+    p_tools_report.add_argument(
+        "--group-by",
+        choices=("total", "day", "tool", "session", "event", "day-tool", "day-session"),
+        default="tool",
+    )
+    p_tools_report.add_argument("--event-name", default="codex.tool_result", help="Tool event type to include")
+    p_tools_report.add_argument("--tool-name", help="Only include one tool")
+    add_report_filters(p_tools_report)
+    add_report_output(p_tools_report)
+    p_tools_report.set_defaults(func=tools_report)
 
     p_raw = sub.add_parser("raw", parents=[db_parent], help="List stored raw OTEL payloads")
     add_raw_filters(p_raw)
