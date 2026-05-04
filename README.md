@@ -1,10 +1,29 @@
 # Codex Usage Observer
 
-This is a local and multi-machine observability setup for Codex usage. The
-client runs a local OTLP/HTTP receiver, stores extracted usage rows in SQLite,
-and can forward compact usage events to an aggregation server. The aggregation
-server collects usage across machines and includes a simple LAN-only admin UI
-for client tokens.
+This is a local and multi-machine observability setup for Codex usage. It has
+two runtime roles:
+
+- **Local collectors** run beside Codex on each machine. A collector receives
+  Codex OTEL/HTTP telemetry on `127.0.0.1:4318`, stores raw payloads and
+  extracted usage rows in a local SQLite database, and can forward compact
+  usage/tool events to an aggregation server.
+- **The aggregation server** runs once on a trusted host. It accepts compact
+  batches from collectors, stores multi-machine usage in a server SQLite
+  database, manages collector API tokens, and serves web reports.
+
+The collector is still useful without an aggregation server: local summaries,
+raw payload inspection, reindexing, and cleanup all work from the local SQLite
+database. Add an aggregation server when you want a shared view across multiple
+machines.
+
+Typical flow:
+
+```text
+Codex OTEL -> local collector -> local SQLite
+                         |
+                         v
+                 aggregation server -> server SQLite -> /reports and /tools
+```
 
 ## Repository layout
 
@@ -19,7 +38,11 @@ for client tokens.
   server setup.
 - `unraid/`: Unraid Docker template for deploying the aggregation server.
 
-## 1. Start the local receiver
+## 1. Run a local collector
+
+Run this on every machine where you want to capture Codex usage. The collector
+binds to loopback by default and should generally stay local-only because OTEL
+payloads can include sensitive metadata.
 
 ```bash
 python3 codex_usage_observer.py serve --port 4318
@@ -31,9 +54,9 @@ The explicit client command is equivalent:
 python3 codex_usage_observer.py client serve --port 4318
 ```
 
-Leave that process running while you use Codex.
-By default, the receiver binds only to `127.0.0.1`. Use `--allow-remote` only
-on a trusted network; OTEL payloads can contain sensitive local telemetry.
+Leave that process running while you use Codex. Use `--allow-remote` only on a
+trusted network and only when you intentionally want a collector to receive OTEL
+from another host.
 
 ### WSL autostart
 
@@ -83,15 +106,17 @@ Optional: use a config file to control what gets persisted:
 python3 codex_usage_observer.py --config codex_usage_observer.toml serve --port 4318
 ```
 
-Start from `codex_usage_observer.example.toml`. The main storage choices are:
+Start from `codex_usage_observer.example.toml`. The main collector choices are:
 
 - `client_name`: names this machine/client for later aggregation.
-- `[collector]`: optional aggregation-server endpoint and client API key.
-- `[aggregation_server]`: bind address and database for the aggregation server.
+- `[collector]`: optional aggregation-server endpoint and client API key for forwarding.
 - `raw_payload_body`: store full raw OTEL payload bodies, or keep only metadata.
 - `extracted_attributes`: store extracted attributes as `redacted`, `full`, or `none`.
 - `model`, `session_id`, `thread_id`: choose whether these dimensions are stored on usage rows.
 - `max_body_bytes`: reject oversized inbound payloads.
+
+The `[aggregation_server]` section is only used when this same checkout is also
+started with `server serve`.
 
 ### macOS auto-start with launchd
 
@@ -185,7 +210,11 @@ The receiver also stores non-JSON payloads raw, but token extraction needs JSON.
 Codex batches telemetry asynchronously, so start a fresh Codex session after
 changing this config and check the observer again after the session has ended.
 
-## Aggregation Server
+## Aggregation server
+
+Run one aggregation server when you want multiple collectors to report into a
+single place. Collectors authenticate with per-client API tokens created from
+the server's admin UI. The server stores only token hashes, not the raw tokens.
 
 Start the aggregation server:
 
@@ -196,8 +225,9 @@ python3 codex_usage_observer.py --config codex_usage_observer.toml server serve
 By default it binds to `127.0.0.1:8318`. Use `--allow-remote` only on a trusted
 LAN; the MVP admin UI has no login and relies on network placement.
 
-Open `/admin` in a browser to create, rename, and revoke client tokens. New
-tokens are shown once. Only token hashes are stored in the server SQLite DB.
+Open `/admin` in a browser to create, rename, revoke, and delete revoked
+collector tokens. New tokens are shown once. Only token hashes are stored in the
+server SQLite DB.
 
 Configure each collector with the generated token:
 
@@ -211,11 +241,11 @@ batch_size = 100
 timeout_seconds = 10
 ```
 
-The client keeps local reports and queues unsynced rows. It tracks the server
-target it last synced each event to. If `client_name`, `[collector].endpoint`,
-or `[collector].api_key` changes, historical usage becomes pending for that new
-target and is sent on receiver startup or the next manual sync. Run a manual
-retry with:
+Each collector keeps its own local reports and queues unsynced rows. It tracks
+the server target it last synced each event to. If `client_name`,
+`[collector].endpoint`, or `[collector].api_key` changes, historical usage
+becomes pending for that new target and is sent on collector startup or the next
+manual sync. Run a manual retry with:
 
 ```bash
 python3 codex_usage_observer.py client sync
