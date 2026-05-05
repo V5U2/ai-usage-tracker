@@ -966,6 +966,72 @@ port = 18418
             self.assertIn("abc123", rows[0][0], "client_event_id should include trace_id")
             self.assertIn("def456", rows[0][0], "client_event_id should include span_id")
 
+    def test_claude_code_token_metric_points_with_same_span_are_distinct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "usage.sqlite"
+            con = app.connect(db)
+            app.ensure_usage_metadata_schema(con)
+            app.ensure_client_sync_schema(con)
+            payload = claude_code_metric_payload(
+                [
+                    (
+                        "claude_code.token.usage",
+                        100,
+                        {
+                            "type": "input",
+                            "model": "claude-sonnet-4.5",
+                            "trace_id": "trace-1",
+                            "span_id": "span-1",
+                        },
+                    ),
+                    (
+                        "claude_code.token.usage",
+                        20,
+                        {
+                            "type": "output",
+                            "model": "claude-sonnet-4.5",
+                            "trace_id": "trace-1",
+                            "span_id": "span-1",
+                        },
+                    ),
+                    (
+                        "claude_code.token.usage",
+                        30,
+                        {
+                            "type": "cacheRead",
+                            "model": "claude-sonnet-4.5",
+                            "trace_id": "trace-1",
+                            "span_id": "span-1",
+                        },
+                    ),
+                ]
+            )
+            body = json.dumps(payload).encode()
+
+            for _ in range(2):
+                raw_id = app.insert_payload(con, "/v1/metrics", "application/json", body)
+                app.insert_usage(con, raw_id, "2026-05-05T12:00:00+00:00", app.extract_usage("/v1/metrics", body))
+
+            rows = list(
+                con.execute(
+                    """
+                    select client_event_id, input_tokens, output_tokens, cached_tokens
+                    from usage_events
+                    order by client_event_id
+                    """
+                )
+            )
+            con.close()
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(sum(row["input_tokens"] for row in rows), 100)
+        self.assertEqual(sum(row["output_tokens"] for row in rows), 20)
+        self.assertEqual(sum(row["cached_tokens"] for row in rows), 30)
+        self.assertTrue(all("trace-1" in row["client_event_id"] for row in rows))
+        self.assertTrue(any(row["client_event_id"].endswith(":input") for row in rows))
+        self.assertTrue(any(row["client_event_id"].endswith(":output") for row in rows))
+        self.assertTrue(any(row["client_event_id"].endswith(":cacheRead") for row in rows))
+
 
 class DatabaseReportTests(unittest.TestCase):
     def test_report_rows_group_by_day_model(self):

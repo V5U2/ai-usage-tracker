@@ -1454,7 +1454,12 @@ def usage_client_event_id(event: dict[str, Any]) -> str:
     if explicit:
         return str(explicit)
     if event.get("trace_id") and event.get("span_id"):
-        return f"{event.get('signal')}:{event.get('trace_id')}:{event.get('span_id')}"
+        parts = [event.get("signal"), event.get("trace_id"), event.get("span_id"), event.get("event_name")]
+        attrs = stored_event_attrs(event.get("attributes_json"))
+        token_type = attrs.get("type")
+        if token_type not in (None, ""):
+            parts.append(token_type)
+        return ":".join(str(part or "") for part in parts)
     return f"evt_{secrets.token_urlsafe(18)}"
 
 
