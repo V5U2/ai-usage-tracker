@@ -375,7 +375,13 @@ claude
 The collector normalizes `claude_code.token.usage` metrics with `type` values
 of `input`, `output`, `cacheRead`, and `cacheCreation`; it also stores
 `claude_code.cost.usage` as USD cost and recognizes Claude Code tool result and
-tool decision events.
+tool decision events. Claude Code can emit the same API request through metrics,
+logs, and beta traces. To avoid double counting, usage totals are taken from the
+Claude Code metric streams; `api_request` logs and `claude_code.llm_request`
+trace spans are retained as raw payload context and tool/event telemetry, but
+are not inserted as separate usage rows. If Claude Code retries the same OTLP
+payload with stable trace/span identifiers, the collector treats the duplicate
+usage or tool row as already accepted and still returns a successful response.
 
 ### Claude Desktop / Cowork OTEL caveats
 
@@ -548,6 +554,9 @@ is the system where usage came from, such as Codex, Claude Code, or OpenRouter.
 `source` is the identity inside that provider: for collector-synced local usage
 it is normally the collector or workspace, while for OpenRouter it is the
 workspace first, then API key label if no workspace is available.
+For known OpenAI and Claude API model names, the `model` column uses the matched
+pricing family label, such as `claude-sonnet-4.5`, so provider-prefixed and
+dated aliases group together. Raw model names remain stored unchanged.
 
 Retained Broadcast payloads can be replayed after parser changes:
 

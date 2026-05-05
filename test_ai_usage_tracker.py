@@ -413,8 +413,8 @@ class ExtractionTests(unittest.TestCase):
         config = app.AppConfig(pricing=app.PricingConfig(estimate_claude_api_costs=True))
 
         event = app.usage_from_attrs(
-            "metrics",
-            "claude_code.token.usage",
+            "logs",
+            "response.completed",
             {
                 "model": "claude-sonnet-4-5-20250929",
                 "input_tokens": "1000000",
@@ -433,8 +433,8 @@ class ExtractionTests(unittest.TestCase):
         config = app.AppConfig(pricing=app.PricingConfig(estimate_claude_api_costs=True))
 
         event = app.usage_from_attrs(
-            "metrics",
-            "claude_code.token.usage",
+            "logs",
+            "response.completed",
             {
                 "model": "claude-haiku-4-5-20251001",
                 "input_tokens": "1000000",
@@ -446,6 +446,31 @@ class ExtractionTests(unittest.TestCase):
         self.assertIsNotNone(event)
         self.assertAlmostEqual(event["cost_value"], 1.5)
         self.assertEqual(event["cost_unit"], "USD")
+
+    def test_claude_code_token_metric_does_not_estimate_duplicate_cost(self):
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_claude_api_costs=True))
+
+        event = app.usage_from_attrs(
+            "metrics",
+            "claude_code.token.usage",
+            {
+                "model": "claude-haiku-4-5-20251001",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+            },
+            config,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event["cost_value"], 0)
+        self.assertIsNone(event["cost_unit"])
+
+    def test_friendly_model_name_uses_matched_claude_price_family(self):
+        self.assertEqual(
+            app.friendly_model_name("au.anthropic.claude-sonnet-4-5-20250929-v1:0"),
+            "claude-sonnet-4.5",
+        )
+        self.assertEqual(app.friendly_model_name("claude-sonnet-4-5-20250929"), "claude-sonnet-4.5")
 
     def test_claude_api_cost_estimation_is_opt_in_and_preserves_reported_cost(self):
         event = app.usage_from_attrs(
@@ -547,6 +572,68 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(cache_event["total_tokens"], 0)
         self.assertEqual(cost_event["cost_value"], 0.012)
         self.assertEqual(cost_event["cost_unit"], "USD")
+
+    def test_claude_code_logs_and_traces_are_not_counted_as_usage(self):
+        log_body = json.dumps(
+            log_payload(
+                {
+                    "service.name": "claude-code",
+                    "event.name": "api_request",
+                    "model": "claude-sonnet-4-5-20250929",
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "cost_usd": 0.1,
+                }
+            )
+        ).encode()
+        trace_body = json.dumps(
+            {
+                "resourceSpans": [
+                    {
+                        "resource": {
+                            "attributes": [{"key": "service.name", "value": {"stringValue": "claude-code"}}]
+                        },
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "traceId": "trace-1",
+                                        "spanId": "span-1",
+                                        "name": "claude_code.llm_request",
+                                        "attributes": [
+                                            {"key": "model", "value": {"stringValue": "claude-sonnet-4-5-20250929"}},
+                                            {"key": "input_tokens", "value": {"intValue": "10"}},
+                                            {"key": "output_tokens", "value": {"intValue": "2"}},
+                                            {"key": "cost_usd", "value": {"doubleValue": "0.1"}},
+                                        ],
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            }
+        ).encode()
+
+        self.assertEqual(app.extract_usage("/v1/logs", log_body), [])
+        self.assertEqual(app.extract_usage("/v1/traces", trace_body), [])
+
+    def test_log_record_top_level_trace_context_is_extracted(self):
+        payload = log_payload(
+            {
+                "event.name": "response.completed",
+                "model": "gpt-test",
+                "input_tokens": 1,
+            }
+        )
+        record = payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]
+        record["traceId"] = "trace-top"
+        record["spanId"] = "span-top"
+
+        event = app.extract_usage("/v1/logs", json.dumps(payload).encode())[0]
+
+        self.assertEqual(event["trace_id"], "trace-top")
+        self.assertEqual(event["span_id"], "span-top")
 
     def test_redacts_account_metadata_but_keeps_token_counts(self):
         payload = log_payload(
@@ -820,6 +907,64 @@ port = 18418
         self.assertIn("usage_events=2", line)
         self.assertIn("tool_events=3", line)
         self.assertIn("raw_id=42", line)
+
+    def test_claude_code_retry_deduplication_uses_trace_span_ids(self):
+        """Test that Claude Code events with trace_id+span_id deduplicate retries."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "usage.sqlite"
+            con = app.connect(db)
+            app.ensure_usage_metadata_schema(con)
+            app.ensure_client_sync_schema(con)
+
+            # Simulate Claude Code sending an event with trace_id and span_id
+            payload = {
+                "resourceMetrics": [
+                    {
+                        "resource": {
+                            "attributes": [
+                                {"key": "session_id", "value": {"stringValue": "claude-session-1"}},
+                                {"key": "trace_id", "value": {"stringValue": "abc123"}},
+                            ]
+                        },
+                        "scopeMetrics": [
+                            {
+                                "metrics": [
+                                    {
+                                        "name": "claude_code.token.usage",
+                                        "sum": {
+                                            "dataPoints": [
+                                                {
+                                                    "attributes": [
+                                                        {"key": "type", "value": {"stringValue": "input"}},
+                                                        {"key": "model", "value": {"stringValue": "claude-sonnet-4.5"}},
+                                                        {"key": "trace_id", "value": {"stringValue": "abc123"}},
+                                                        {"key": "span_id", "value": {"stringValue": "def456"}},
+                                                    ],
+                                                    "asInt": 100,
+                                                }
+                                            ]
+                                        },
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            # Insert the same event twice (simulating a retry)
+            for _ in range(2):
+                raw_id = app.insert_payload(con, "/v1/metrics", "application/json", json.dumps(payload).encode())
+                events = app.extract_usage("/v1/metrics", json.dumps(payload).encode())
+                app.insert_usage(con, raw_id, "2026-05-05T12:00:00+00:00", events)
+
+            # Verify only one event was stored
+            rows = list(con.execute("select client_event_id, input_tokens from usage_events"))
+            self.assertEqual(len(rows), 1, "Should only have one event despite retry")
+            self.assertEqual(rows[0][1], 100)
+            # Verify the client_event_id uses trace_id and span_id
+            self.assertIn("abc123", rows[0][0], "client_event_id should include trace_id")
+            self.assertIn("def456", rows[0][0], "client_event_id should include span_id")
 
 
 class DatabaseReportTests(unittest.TestCase):
@@ -1287,6 +1432,52 @@ class ClientSyncTests(unittest.TestCase):
             self.assertIsNotNone(tool_row["synced_at"])
             self.assertEqual(tool_row["synced_server_key"], app.sync_server_key(handler.app_config))
             self.assertEqual(post.call_count, 1)
+
+    def test_receiver_treats_trace_span_retry_as_idempotent(self):
+        payload = claude_code_metric_payload(
+            [
+                (
+                    "claude_code.token.usage",
+                    100,
+                    {
+                        "type": "input",
+                        "model": "claude-sonnet-4.5",
+                        "trace_id": "trace-1",
+                        "span_id": "span-1",
+                    },
+                )
+            ]
+        )
+        body = json.dumps(payload).encode()
+
+        def run_once(db: Path) -> list[int]:
+            handler = object.__new__(app.Receiver)
+            handler.db_path = db
+            handler.app_config = app.AppConfig()
+            handler.path = "/v1/metrics"
+            handler.headers = {"content-length": str(len(body)), "content-type": "application/json"}
+            handler.rfile = io.BytesIO(body)
+            handler.wfile = io.BytesIO()
+            responses: list[int] = []
+            handler.send_response = responses.append
+            handler.send_header = lambda _key, _value: None
+            handler.end_headers = lambda: None
+            handler.do_POST()
+            return responses
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "usage.sqlite"
+            first = run_once(db)
+            second = run_once(db)
+            con = app.connect(db)
+            usage_count = con.execute("select count(*) from usage_events").fetchone()[0]
+            raw_count = con.execute("select count(*) from raw_payloads").fetchone()[0]
+            con.close()
+
+        self.assertEqual(first, [200])
+        self.assertEqual(second, [200])
+        self.assertEqual(usage_count, 1)
+        self.assertEqual(raw_count, 2)
 
     def test_receiver_event_driven_sync_uses_configured_batch_size(self):
         payload = log_payload(
@@ -2012,6 +2203,62 @@ class ServerHttpTests(unittest.TestCase):
             self.assertEqual(grouped[("Local OTEL", "Laptop", "gpt-test")], 15)
             self.assertEqual(grouped[("OpenRouter", "agents", "openai/gpt-4o")], 17)
             self.assertEqual(app.server_default_columns("provider-source-model")[:3], ("source_provider", "source_label", "model"))
+
+    def test_server_report_groups_priced_claude_models_by_friendly_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.create_client_token(con, "laptop", "Laptop")
+            for index, model in enumerate(
+                (
+                    "au.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                    "claude-sonnet-4-5-20250929",
+                ),
+                start=1,
+            ):
+                app.ingest_usage_events(
+                    con,
+                    "laptop",
+                    [
+                        {
+                            "client_event_id": f"claude-{index}",
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "metrics",
+                            "event_name": "claude_code.token.usage",
+                            "model": model,
+                            "input_tokens": 10,
+                            "output_tokens": 5,
+                            "total_tokens": 15,
+                            "cost_value": 0.01,
+                            "cost_unit": "USD",
+                            "attributes_json": "{}",
+                        }
+                    ],
+                )
+            con.commit()
+            args = argparse.Namespace(
+                group_by="provider-source-model",
+                since=None,
+                until=None,
+                model=None,
+                session_id=None,
+                client_name=None,
+                source_kind=None,
+                workspace_label=None,
+                api_key_label=None,
+                provider_name=None,
+                limit=100,
+            )
+            rows = app.server_report_rows(con, args)
+            filtered_args = argparse.Namespace(**{**vars(args), "model": "claude-sonnet-4.5"})
+            filtered_rows = app.server_report_rows(con, filtered_args)
+            con.close()
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["model"], "claude-sonnet-4.5")
+            self.assertEqual(rows[0]["events"], 2)
+            self.assertEqual(rows[0]["total_tokens"], 30)
+            self.assertEqual(len(filtered_rows), 1)
+            self.assertEqual(filtered_rows[0]["events"], 2)
 
     def test_server_reports_group_openrouter_by_workspace(self):
         body = json.dumps(openrouter_trace_payload()).encode()

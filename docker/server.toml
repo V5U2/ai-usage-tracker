@@ -14,6 +14,11 @@ enabled = false
 # required_header_value = "change-me-too"
 retain_payload_body = true
 
+[pricing]
+estimate_openai_api_costs = true
+estimate_claude_api_costs = true
+include_reasoning_tokens_as_output = true
+
 [storage]
 raw_payload_body = false
 extracted_attributes = "redacted"
