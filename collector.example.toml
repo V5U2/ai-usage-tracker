@@ -12,28 +12,6 @@ client_name = "local"
 batch_size = 100
 timeout_seconds = 10
 
-[aggregation_server]
-# Used by `python3 ai_usage_tracker.py server serve`.
-host = "127.0.0.1"
-port = 8318
-db = "ai_usage_server.sqlite"
-# Required for JSON report APIs. The LAN-only admin UI does not require login.
-# admin_api_key = "change-me"
-
-[openrouter_broadcast]
-# Optional direct OpenRouter Broadcast OTLP ingest at POST /v1/traces.
-# Configure the same token in OpenRouter Broadcast custom headers as:
-# Authorization: Bearer <api_key>
-enabled = false
-# api_key = "change-me"
-# Optional extra exact-match header for a custom header that reaches the origin.
-# Do not use this for Cloudflare Access service-token headers; Cloudflare
-# consumes those at the edge.
-# required_header_name = "X-OpenRouter-Broadcast-Secret"
-# required_header_value = "change-me-too"
-# Retain Broadcast OTLP bodies for `server replay-broadcast`.
-retain_payload_body = true
-
 [pricing]
 # Estimate missing OpenAI API costs from token counts for known OpenAI model
 # names, and missing Claude API costs from token counts for known Claude model
@@ -46,10 +24,6 @@ estimate_claude_api_costs = false
 # true unless your telemetry source already includes reasoning tokens in
 # output_tokens.
 include_reasoning_tokens_as_output = true
-# Reporting-only normalization for OpenRouter Broadcast rows. When true,
-# nonzero costs stored as OpenRouter "credits" are treated as USD in reports
-# and dashboard summaries. Stored rows keep their original provider unit.
-report_openrouter_credits_as_usd = false
 
 [storage]
 # Keep only payload metadata plus extracted token/tool rows by default. Set true

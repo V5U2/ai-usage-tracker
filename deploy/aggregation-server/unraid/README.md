@@ -22,7 +22,7 @@ Import options:
    ```bash
    UNRAID_HOST=root@unraid-host \
    TEMPLATE_NAME=my-ai-usage-tracker.xml \
-   deploy/unraid/install-template.sh
+   deploy/aggregation-server/unraid/install-template.sh
    ```
 
 2. Or copy `ai-usage-tracker.xml` to `/boot/config/plugins/dockerMan/templates-user/`
@@ -31,7 +31,7 @@ Import options:
    it is available from the default branch:
 
 ```text
-https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/deploy/unraid/ai-usage-tracker.xml
+https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/deploy/aggregation-server/unraid/ai-usage-tracker.xml
 ```
 
 After the container starts, create collector client tokens at `/admin`, then

@@ -10,7 +10,7 @@ does not rewrite stored provider units.
 Primary runtime command:
 
 ```bash
-python3 ai_usage_tracker.py --config ai_usage_tracker.toml server serve
+python3 ai_usage_tracker.py --config server.toml server serve
 ```
 
 Docker runs the same component with `/data` persistence:

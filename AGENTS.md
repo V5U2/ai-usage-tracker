@@ -29,10 +29,10 @@ Key entry points:
 - If a change affects receiver/server behavior, CLI flags, config keys, collector forwarding auth, Docker setup, launchd setup, sync semantics, reporting, storage, or operational workflows, update the relevant docs in the same task.
 - At minimum, review whether changes are needed in:
   - `README.md`
-  - `ai_usage_tracker.example.toml`
-  - `ai_usage_tracker.example.toml`
+  - `collector.example.toml`
+  - `server.example.toml`
   - `docker/server.toml`
-  - `deploy/unraid/ai-usage-tracker.xml`
+  - `deploy/aggregation-server/unraid/ai-usage-tracker.xml`
   - launchd or Docker instructions in the README
 - For release-facing changes, also review whether updates are needed in changelog, release notes, migration notes, or version references if those files are later added.
 - Do not leave user-facing copy or docs knowingly inconsistent with implementation.

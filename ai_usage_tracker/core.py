@@ -1015,6 +1015,11 @@ def friendly_model_name(model: str | None) -> str:
     return openai_api_price_key_for_model(raw_model) or claude_api_price_key_for_model(raw_model) or raw_model
 
 
+def stored_attr_value(attributes_json: str | None, key: str) -> str | None:
+    value = stored_event_attrs(attributes_json).get(key)
+    return str(value) if value not in (None, "") else None
+
+
 def estimate_openai_api_cost(
     model: str | None,
     input_tokens: int,
@@ -4001,6 +4006,7 @@ def tool_source_provider_expression() -> str:
           when tool_events.event_name like 'claude_code.%'
             or lower(coalesce(tool_events.model, '')) like 'claude%'
             or lower(coalesce(tool_events.model, '')) like 'au.anthropic.%'
+            or lower(coalesce(stored_attr_value(tool_events.attributes_json, 'service.name'), '')) in ('claude-code', 'claude_code')
             then 'Claude Code'
           when tool_events.event_name like 'codex.%'
             then 'Codex'
@@ -4032,6 +4038,7 @@ def source_label_expression() -> str:
 
 def register_report_functions(con: sqlite3.Connection) -> None:
     con.create_function("friendly_model_name", 1, friendly_model_name)
+    con.create_function("stored_attr_value", 2, stored_attr_value)
 
 
 def server_model_expression() -> str:
@@ -4216,6 +4223,7 @@ def server_report_rows(
 
 
 def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
+    register_report_functions(con)
     period_expr, source_provider_expr, client_expr, tool_expr, session_expr, event_expr = server_tool_group_expressions(
         args.group_by
     )
@@ -4251,6 +4259,7 @@ def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -
 
 
 def server_tool_recent_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
+    register_report_functions(con)
     where, params = server_tool_where_clause(args)
     provider_expr = tool_source_provider_expression()
     if where:

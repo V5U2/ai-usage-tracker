@@ -41,12 +41,15 @@ jobs:
           rm -rf dist
           mkdir -p "${package_dir}"
           cp ai_usage_tracker.py "${package_dir}/"
-          cp ai_usage_tracker.example.toml "${package_dir}/"
+          cp collector.example.toml "${package_dir}/"
+          cp server.example.toml "${package_dir}/"
           cp README.md "${package_dir}/"
+          cp LICENSE "${package_dir}/"
           test -d ai_usage_tracker
           cp -R ai_usage_tracker "${package_dir}/ai_usage_tracker"
           mkdir -p "${package_dir}/deploy"
           cp -R deploy/collector "${package_dir}/deploy/collector"
+          cp -R deploy/aggregation-server "${package_dir}/deploy/aggregation-server"
           cp deploy/README.md "${package_dir}/deploy/README.md"
 
           tar -C dist -czf "dist/${archive}" "ai-usage-tracker-collector-${tag}"
