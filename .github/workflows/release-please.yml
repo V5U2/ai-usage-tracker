@@ -1,0 +1,108 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  packages: write
+
+jobs:
+  release-please:
+    name: Prepare or publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Check out repository
+        if: ${{ steps.release.outputs.release_created }}
+        uses: actions/checkout@v4
+
+      - name: Build collector release tarball
+        if: ${{ steps.release.outputs.release_created }}
+        id: collector
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release.outputs.tag_name }}"
+          package_dir="dist/ai-usage-tracker-collector-${tag}"
+          archive="ai-usage-tracker-collector-${tag}.tar.gz"
+
+          rm -rf dist
+          mkdir -p "${package_dir}"
+          cp ai_usage_tracker.py "${package_dir}/"
+          cp ai_usage_tracker.example.toml "${package_dir}/"
+          cp README.md "${package_dir}/"
+          test -d ai_usage_tracker
+          cp -R ai_usage_tracker "${package_dir}/ai_usage_tracker"
+          mkdir -p "${package_dir}/deploy"
+          cp -R deploy/collector "${package_dir}/deploy/collector"
+          cp deploy/README.md "${package_dir}/deploy/README.md"
+
+          tar -C dist -czf "dist/${archive}" "ai-usage-tracker-collector-${tag}"
+          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload collector workflow artifact
+        if: ${{ steps.release.outputs.release_created }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.collector.outputs.archive }}
+          path: dist/${{ steps.collector.outputs.archive }}
+          if-no-files-found: error
+
+      - name: Attach collector tarball to GitHub release
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ steps.release.outputs.tag_name }}" "dist/${{ steps.collector.outputs.archive }}" --clobber
+
+      - name: Set up Docker Buildx
+        if: ${{ steps.release.outputs.release_created }}
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: ${{ steps.release.outputs.release_created }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image name
+        if: ${{ steps.release.outputs.release_created }}
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "${GITHUB_OUTPUT}"
+
+      - name: Extract Docker metadata
+        if: ${{ steps.release.outputs.release_created }}
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=${{ steps.release.outputs.tag_name }}
+            type=raw,value=latest
+
+      - name: Build and push image
+        if: ${{ steps.release.outputs.release_created }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          build-args: |
+            AI_USAGE_VERSION=${{ steps.release.outputs.tag_name }}
+            AI_USAGE_COMMIT=${{ steps.release.outputs.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

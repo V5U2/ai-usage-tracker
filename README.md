@@ -688,30 +688,43 @@ The `edge` tag is only updated by pushes to `main`. Pull requests publish
 `pr-<number>` plus the immutable commit SHA tag. Forked pull requests build the
 image but do not push to GHCR.
 
-Release publishing runs when a `v*` tag is pushed, or from manual dispatch of
-the `Release` workflow. It builds the server container and pushes it to GitHub
-Container Registry:
+Release Please runs on pushes to `main` and opens or updates a release PR when
+there are conventional commits since the last release. Merge the Release Please
+PR to tag the release, create the GitHub Release, attach the collector tarball,
+and publish the stable container image.
+
+Release Please updates:
+
+- `CHANGELOG.md`
+- `.release-please-manifest.json`
+- `APP_VERSION` in `ai_usage_tracker/core.py`
+
+Use conventional PR or squash-merge titles for user-facing changes, such as
+`fix: ...`, `feat: ...`, or `docs: ...`. Use `Release-As: x.y.z` in a commit
+footer only when a specific version is required.
+
+Release images are pushed to GitHub Container Registry:
 
 ```text
 ghcr.io/v5u2/ai-usage-tracker
 ```
 
-Push a release tag:
+Published image tags include the release tag. Stable tags also update `latest`;
+prerelease tags should be marked as prereleases in the release PR workflow. The
+`latest` tag is reserved for stable releases and is not updated by ordinary
+commits or pull requests.
+
+Manual tag-based releases remain available as a fallback through the `Release`
+workflow. Push a release tag only when bypassing Release Please is intended:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Published image tags include the release tag. Stable tags without a hyphen also
-update `latest`; prerelease tags such as `v0.1.0-rc.1` do not. The `latest` tag
-is reserved for stable releases and is not updated by ordinary commits or pull
-requests.
-
 Manual releases can be started from the GitHub Actions UI with a `tag` input.
-The release workflow also creates or updates the matching GitHub Release with
-generated release notes. Do not bump versions, tag releases, or publish images
-unless that release action is intended.
+Do not manually bump versions, tag releases, or publish images unless that
+release action is intended.
 
 ### Unraid deployment
 
