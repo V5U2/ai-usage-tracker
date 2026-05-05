@@ -601,6 +601,13 @@ docker compose ps
 docker logs --tail 50 ai-usage-tracker-server
 ```
 
+The image includes the `sqlite3` CLI for operational inspection and repair of
+the persisted server database:
+
+```bash
+docker exec ai-usage-tracker-server sqlite3 /data/ai_usage_server.sqlite ".tables"
+```
+
 Stop the server:
 
 ```bash
