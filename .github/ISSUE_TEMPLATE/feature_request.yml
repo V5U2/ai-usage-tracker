@@ -1,0 +1,64 @@
+name: Feature request
+description: Suggest an improvement or new capability.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for new collection, reporting, deployment, or operational workflow ideas. For defects or regressions, use the bug report form instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what is difficult with the current behavior?
+      placeholder: I want to compare OpenRouter usage by workspace and API key over a custom date range.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior, command, configuration, report, or deployment change you want.
+      placeholder: Add a report grouping option that...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Choose the primary area this request affects.
+      options:
+        - Collector
+        - Aggregation server
+        - Reports/UI
+        - OpenTelemetry ingestion
+        - Provider-specific telemetry
+        - Docker deployment
+        - Linux/systemd deployment
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or other designs have you considered?
+      placeholder: I can export SQLite data manually, but...
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and rollout notes
+      description: Mention whether this must preserve existing collector behavior, config keys, database schema, Docker setup, or report URLs.
+      placeholder: This should not break existing collectors forwarding to the aggregation server.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submit checks
+      options:
+        - label: I have searched existing issues and pull requests.
+          required: true
+        - label: This is a feature request, not a bug report.
+          required: true
