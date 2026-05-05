@@ -233,6 +233,24 @@ TOOL_EVENT_NAMES = {
 VERBOSE_TOOL_ATTRS = {"arguments", "output"}
 OPENROUTER_BROADCAST_CLIENT = "openrouter-broadcast"
 OPENROUTER_SOURCE_KIND = "openrouter_broadcast"
+OPENAI_API_MODEL_PRICES_USD_PER_1M: dict[str, tuple[float, float, float]] = {
+    # model/prefix: (input, cached input, output)
+    "gpt-5.5": (5.00, 0.50, 30.00),
+    "gpt-5.4-mini": (0.75, 0.075, 4.50),
+    "gpt-5.4-nano": (0.20, 0.02, 1.25),
+    "gpt-5.4": (2.50, 0.25, 15.00),
+    "gpt-5.3-codex": (1.75, 0.175, 14.00),
+    "gpt-5.3-chat": (1.75, 0.175, 14.00),
+    "gpt-5.3": (1.75, 0.175, 14.00),
+    "gpt-5.2-codex": (1.75, 0.175, 14.00),
+    "gpt-5.1-codex-mini": (0.25, 0.025, 2.00),
+    "gpt-5.1-codex-max": (1.25, 0.125, 10.00),
+    "gpt-5.1-codex": (1.25, 0.125, 10.00),
+    "gpt-5-codex": (1.25, 0.125, 10.00),
+    "gpt-5-chat": (1.25, 0.125, 10.00),
+    "gpt-5-nano": (0.05, 0.005, 0.40),
+    "gpt-5": (1.25, 0.125, 10.00),
+}
 COST_UNIT_REPORT_GROUPS = {
     "client",
     "client-model",
@@ -286,12 +304,19 @@ class OpenRouterBroadcastConfig:
 
 
 @dataclass(frozen=True)
+class PricingConfig:
+    estimate_openai_api_costs: bool = False
+    include_reasoning_tokens_as_output: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     client_name: str = "local"
     storage: StorageConfig = field(default_factory=StorageConfig)
     server: RemoteServerConfig = field(default_factory=RemoteServerConfig)
     central: ServerConfig = field(default_factory=ServerConfig)
     openrouter_broadcast: OpenRouterBroadcastConfig = field(default_factory=OpenRouterBroadcastConfig)
+    pricing: PricingConfig = field(default_factory=PricingConfig)
     redaction_keys: frozenset[str] = frozenset(SENSITIVE_ATTR_KEYS)
     redaction_key_parts: tuple[str, ...] = SENSITIVE_ATTR_PARTS
 
@@ -382,6 +407,10 @@ def parse_basic_toml_value(value: str) -> Any:
         return [parse_basic_toml_value(item.strip()) for item in body.split(",") if item.strip()]
     try:
         return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
     except ValueError as exc:
         raise ValueError(f"unsupported TOML value: {value}") from exc
 
@@ -445,6 +474,7 @@ def load_config(path: Path | None) -> AppConfig:
     collector_data = merged_table_config(data, "server", "collector")
     aggregation_data = merged_table_config(data, "central_server", "aggregation_server")
     openrouter_data = table_config(data, "openrouter_broadcast")
+    pricing_data = table_config(data, "pricing")
     redaction_data = table_config(data, "redaction")
 
     extracted_attributes = storage_data.get("extracted_attributes", "redacted")
@@ -480,12 +510,17 @@ def load_config(path: Path | None) -> AppConfig:
         required_header_value=optional_str_config(openrouter_data, "required_header_value"),
         retain_payload_body=bool_config(openrouter_data, "retain_payload_body", True),
     )
+    pricing = PricingConfig(
+        estimate_openai_api_costs=bool_config(pricing_data, "estimate_openai_api_costs", False),
+        include_reasoning_tokens_as_output=bool_config(pricing_data, "include_reasoning_tokens_as_output", True),
+    )
     return AppConfig(
         client_name=str_config(data, "client_name", "local"),
         storage=storage,
         server=remote_server,
         central=central,
         openrouter_broadcast=openrouter_broadcast,
+        pricing=pricing,
         redaction_keys=frozenset(key.lower() for key in list_config(redaction_data, "keys", SENSITIVE_ATTR_KEYS)),
         redaction_key_parts=tuple(
             part.lower() for part in list_config(redaction_data, "key_parts", SENSITIVE_ATTR_PARTS)
@@ -901,6 +936,47 @@ def stored_tool_attributes_json(attrs: dict[str, Any], config: AppConfig) -> str
     return stored_attributes_json(compact_attrs, config)
 
 
+def normalize_model_name(model: str | None) -> str:
+    return (model or "").strip().lower()
+
+
+def openai_api_price_for_model(model: str | None) -> tuple[float, float, float] | None:
+    normalized = normalize_model_name(model)
+    if not normalized:
+        return None
+    if normalized in OPENAI_API_MODEL_PRICES_USD_PER_1M:
+        return OPENAI_API_MODEL_PRICES_USD_PER_1M[normalized]
+    prices = sorted(OPENAI_API_MODEL_PRICES_USD_PER_1M.items(), key=lambda item: len(item[0]), reverse=True)
+    for prefix, price in prices:
+        if normalized.startswith(prefix + "-") or normalized.startswith(prefix + "."):
+            return price
+    return None
+
+
+def estimate_openai_api_cost(
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int,
+    reasoning_tokens: int,
+    config: AppConfig,
+) -> float:
+    price = openai_api_price_for_model(model)
+    if not price:
+        return 0.0
+    input_rate, cached_input_rate, output_rate = price
+    cached_billable = min(max(cached_tokens, 0), max(input_tokens, 0))
+    uncached_input = max(input_tokens - cached_billable, 0)
+    output_billable = max(output_tokens, 0)
+    if config.pricing.include_reasoning_tokens_as_output:
+        output_billable += max(reasoning_tokens, 0)
+    return (
+        uncached_input * input_rate
+        + cached_billable * cached_input_rate
+        + output_billable * output_rate
+    ) / 1_000_000
+
+
 def has_token_signal(attrs: dict[str, Any]) -> bool:
     keys = set(attrs)
     return any(any(alias in keys for alias in aliases) for aliases in TOKEN_KEYS.values())
@@ -966,12 +1042,24 @@ def usage_from_attrs(
     if total_tokens == 0 and (input_tokens or output_tokens):
         total_tokens = input_tokens + output_tokens
 
+    model = first_attr(attrs, ("model", "model_name", "gen_ai.request.model", "gen_ai.response.model")) if config.storage.model else None
+    if config.pricing.estimate_openai_api_costs and not cost_value:
+        estimated_cost = estimate_openai_api_cost(
+            model,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            reasoning_tokens,
+            config,
+        )
+        if estimated_cost:
+            cost_value = estimated_cost
+            cost_unit = "USD"
+
     return {
         "signal": signal,
         "event_name": event_name,
-        "model": first_attr(attrs, ("model", "model_name", "gen_ai.request.model", "gen_ai.response.model"))
-        if config.storage.model
-        else None,
+        "model": model,
         "session_id": first_attr(attrs, ("session_id", "session.id", "codex.session_id"))
         if config.storage.session_id
         else None,

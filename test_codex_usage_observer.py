@@ -209,6 +209,59 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(event["cost_value"], 0.25)
         self.assertEqual(event["cost_unit"], "USD")
 
+    def test_can_estimate_openai_api_cost_when_enabled(self):
+        config = app.AppConfig(
+            pricing=app.PricingConfig(
+                estimate_openai_api_costs=True,
+                include_reasoning_tokens_as_output=True,
+            )
+        )
+
+        event = app.usage_from_attrs(
+            "logs",
+            "response.completed",
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": "1000000",
+                "cached_tokens": "250000",
+                "output_tokens": "100000",
+                "reasoning_tokens": "50000",
+            },
+            config,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertAlmostEqual(event["cost_value"], 1.25625)
+        self.assertEqual(event["cost_unit"], "USD")
+
+    def test_openai_api_cost_estimation_is_opt_in_and_preserves_reported_cost(self):
+        event = app.usage_from_attrs(
+            "logs",
+            "response.completed",
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+            },
+        )
+        self.assertEqual(event["cost_value"], 0)
+        self.assertIsNone(event["cost_unit"])
+
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_openai_api_costs=True))
+        reported = app.usage_from_attrs(
+            "logs",
+            "response.completed",
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+                "cost_usd": "0.42",
+            },
+            config,
+        )
+        self.assertEqual(reported["cost_value"], 0.42)
+        self.assertEqual(reported["cost_unit"], "USD")
+
     def test_extracts_observed_openrouter_broadcast_fields(self):
         body = json.dumps(observed_openrouter_trace_payload()).encode()
         config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
@@ -434,6 +487,23 @@ retain_payload_body = true
             self.assertEqual(config.openrouter_broadcast.required_header_name, "X-OpenRouter-Broadcast-Secret")
             self.assertEqual(config.openrouter_broadcast.required_header_value, "extra-secret")
             self.assertTrue(config.openrouter_broadcast.retain_payload_body)
+
+    def test_load_config_reads_pricing_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[pricing]
+estimate_openai_api_costs = true
+include_reasoning_tokens_as_output = false
+""",
+                encoding="utf-8",
+            )
+
+            config = app.load_config(config_path)
+
+            self.assertTrue(config.pricing.estimate_openai_api_costs)
+            self.assertFalse(config.pricing.include_reasoning_tokens_as_output)
 
     def test_load_config_keeps_legacy_server_section_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -151,6 +151,23 @@ Start from `ai_usage_tracker.example.toml`. The main collector choices are:
 The `[aggregation_server]` section is only used when this same checkout is also
 started with `server serve`.
 
+### Optional OpenAI API cost estimates
+
+Some local telemetry sources emit token counts but not cost. You can opt in to
+estimated USD costs for known OpenAI/Codex API model names:
+
+```toml
+[pricing]
+estimate_openai_api_costs = true
+include_reasoning_tokens_as_output = true
+```
+
+Provider-reported costs always take precedence. Estimates use the built-in
+OpenAI API rates current when this release was built, so review
+`ai_usage_tracker/core.py` when OpenAI pricing changes. The estimate charges
+cached input tokens at the cached-input rate, remaining input tokens at the
+input rate, and output plus reasoning tokens at the output rate.
+
 ### macOS auto-start with launchd
 
 For a script-driven install, use `deploy/collector/install-macos-launchd.sh`.
@@ -708,3 +725,7 @@ The parser already recognises common OpenTelemetry/LLM usage names such as:
   `cacheRead`, or `cacheCreation`
 - `claude_code.cost.usage`
 - cached and reasoning token variants
+
+When `[pricing].estimate_openai_api_costs = true`, known OpenAI/Codex model
+names without provider-reported costs also get estimated USD cost values from
+the embedded API pricing table.
