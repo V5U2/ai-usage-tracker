@@ -63,9 +63,10 @@ cd ai-usage-tracker
 python3 ai_usage_tracker.py client version
 ```
 
-For managed collector or server installs, see [deploy/README.md](deploy/README.md).
-That guide contains Linux systemd, WSL2 notes, macOS launchd, Docker, Unraid,
-Cloudflare Access, release images, and update workflows.
+For managed installs, use the role-specific deployment guides:
+
+- Collector: [deploy/collector/README.md](deploy/collector/README.md)
+- Aggregation server: [deploy/aggregation-server/README.md](deploy/aggregation-server/README.md)
 
 ### 1. Install A Collector
 
@@ -111,8 +112,8 @@ The main collector config choices are:
 
 For autostart and update scripts:
 
-- Linux systemd: [deploy/README.md#linux-collector](deploy/README.md#linux-collector)
-- macOS launchd: [deploy/README.md#macos-collector](deploy/README.md#macos-collector)
+- Linux systemd: [deploy/collector/README.md#linux-collector](deploy/collector/README.md#linux-collector)
+- macOS launchd: [deploy/collector/README.md#macos-collector](deploy/collector/README.md#macos-collector)
 - WSL2: use the Linux path when systemd is enabled.
 
 ### 2. Install The Aggregation Server
@@ -158,9 +159,9 @@ manual sync.
 
 Server deployment options:
 
-- Docker Compose: [deploy/README.md#docker-aggregation-server](deploy/README.md#docker-aggregation-server)
-- Unraid: [deploy/README.md#unraid-aggregation-server](deploy/README.md#unraid-aggregation-server)
-- Cloudflare Access: [deploy/README.md#cloudflare-access](deploy/README.md#cloudflare-access)
+- Docker Compose: [deploy/aggregation-server/README.md#docker-compose](deploy/aggregation-server/README.md#docker-compose)
+- Unraid: [deploy/aggregation-server/README.md#unraid](deploy/aggregation-server/README.md#unraid)
+- Cloudflare Access: [deploy/aggregation-server/README.md#cloudflare-access](deploy/aggregation-server/README.md#cloudflare-access)
 
 ## Configure Telemetry Sources
 

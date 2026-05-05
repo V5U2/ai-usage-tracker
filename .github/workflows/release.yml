@@ -62,6 +62,8 @@ jobs:
           mkdir -p "${package_dir}/deploy"
           cp -R deploy/collector "${package_dir}/deploy/collector"
           cp deploy/README.md "${package_dir}/deploy/README.md"
+          mkdir -p "${package_dir}/deploy/aggregation-server"
+          cp deploy/aggregation-server/README.md "${package_dir}/deploy/aggregation-server/README.md"
 
           tar -C dist -czf "dist/${{ steps.vars.outputs.collector_archive }}" "ai-usage-tracker-collector-${tag}"
 
