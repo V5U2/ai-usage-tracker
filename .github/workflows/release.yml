@@ -96,6 +96,9 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          build-args: |
+            AI_USAGE_VERSION=${{ steps.vars.outputs.tag }}
+            AI_USAGE_COMMIT=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 

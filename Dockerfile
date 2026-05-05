@@ -1,5 +1,10 @@
 FROM python:3.12-slim
 
+ARG AI_USAGE_VERSION=0.4.0
+ARG AI_USAGE_COMMIT=
+ENV AI_USAGE_VERSION=$AI_USAGE_VERSION
+ENV AI_USAGE_COMMIT=$AI_USAGE_COMMIT
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends sqlite3 \
     && rm -rf /var/lib/apt/lists/*

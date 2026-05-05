@@ -47,7 +47,13 @@ jobs:
       - name: Resolve image name
         id: vars
         shell: bash
-        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "${GITHUB_OUTPUT}"
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "${GITHUB_OUTPUT}"
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            echo "version=pr-${{ github.event.pull_request.number }}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "version=edge" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -73,5 +79,8 @@ jobs:
           context: .
           file: ./Dockerfile
           push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          build-args: |
+            AI_USAGE_VERSION=${{ steps.vars.outputs.version }}
+            AI_USAGE_COMMIT=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
