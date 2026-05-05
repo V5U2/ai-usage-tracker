@@ -36,6 +36,19 @@ enabled = false
 # Retain Broadcast OTLP bodies for `server replay-broadcast`.
 retain_payload_body = true
 
+[pricing]
+# Estimate missing OpenAI API costs from token counts for known OpenAI/Codex
+# model names, and missing Claude API costs from token counts for known Claude
+# model names. Provider-reported costs always take precedence. Rates are
+# embedded from the public OpenAI and Claude API pricing docs and should be
+# reviewed when providers change pricing.
+estimate_openai_api_costs = false
+estimate_claude_api_costs = false
+# Reasoning tokens are billed as output tokens by OpenAI API models. Leave this
+# true unless your telemetry source already includes reasoning tokens in
+# output_tokens.
+include_reasoning_tokens_as_output = true
+
 [storage]
 # Keep only payload metadata plus extracted token/tool rows by default. Set true
 # temporarily when troubleshooting raw OTEL payload parsing.

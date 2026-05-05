@@ -209,6 +209,164 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(event["cost_value"], 0.25)
         self.assertEqual(event["cost_unit"], "USD")
 
+    def test_can_estimate_openai_api_cost_when_enabled(self):
+        config = app.AppConfig(
+            pricing=app.PricingConfig(
+                estimate_openai_api_costs=True,
+                include_reasoning_tokens_as_output=True,
+            )
+        )
+
+        event = app.usage_from_attrs(
+            "logs",
+            "response.completed",
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": "1000000",
+                "cached_tokens": "250000",
+                "output_tokens": "100000",
+                "reasoning_tokens": "50000",
+            },
+            config,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertAlmostEqual(event["cost_value"], 1.25625)
+        self.assertEqual(event["cost_unit"], "USD")
+
+    def test_openai_api_cost_estimation_is_opt_in_and_preserves_reported_cost(self):
+        event = app.usage_from_attrs(
+            "logs",
+            "response.completed",
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+            },
+        )
+        self.assertEqual(event["cost_value"], 0)
+        self.assertIsNone(event["cost_unit"])
+
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_openai_api_costs=True))
+        reported = app.usage_from_attrs(
+            "logs",
+            "response.completed",
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+                "cost_usd": "0.42",
+            },
+            config,
+        )
+        self.assertEqual(reported["cost_value"], 0.42)
+        self.assertEqual(reported["cost_unit"], "USD")
+
+    def test_openai_api_cost_estimation_preserves_reported_zero_cost(self):
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_openai_api_costs=True))
+
+        event = app.usage_from_attrs(
+            "logs",
+            "response.completed",
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+                "cost_usd": "0",
+            },
+            config,
+        )
+
+        self.assertEqual(event["cost_value"], 0)
+        self.assertEqual(event["cost_unit"], "USD")
+
+    def test_openai_api_cost_estimation_does_not_require_model_storage(self):
+        config = app.AppConfig(
+            storage=app.StorageConfig(model=False),
+            pricing=app.PricingConfig(estimate_openai_api_costs=True),
+        )
+
+        event = app.usage_from_attrs(
+            "logs",
+            "response.completed",
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+            },
+            config,
+        )
+
+        self.assertIsNone(event["model"])
+        self.assertAlmostEqual(event["cost_value"], 1.2)
+        self.assertEqual(event["cost_unit"], "USD")
+
+    def test_can_estimate_claude_api_cost_when_enabled(self):
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_claude_api_costs=True))
+
+        event = app.usage_from_attrs(
+            "metrics",
+            "claude_code.token.usage",
+            {
+                "model": "claude-sonnet-4-5-20250929",
+                "input_tokens": "1000000",
+                "cache_read_input_tokens": "250000",
+                "cache_creation_input_tokens": "100000",
+                "output_tokens": "100000",
+            },
+            config,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertAlmostEqual(event["cost_value"], 3.9)
+        self.assertEqual(event["cost_unit"], "USD")
+
+    def test_claude_api_cost_estimation_matches_hyphenated_model_family(self):
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_claude_api_costs=True))
+
+        event = app.usage_from_attrs(
+            "metrics",
+            "claude_code.token.usage",
+            {
+                "model": "claude-haiku-4-5-20251001",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+            },
+            config,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertAlmostEqual(event["cost_value"], 1.5)
+        self.assertEqual(event["cost_unit"], "USD")
+
+    def test_claude_api_cost_estimation_is_opt_in_and_preserves_reported_cost(self):
+        event = app.usage_from_attrs(
+            "metrics",
+            "claude_code.token.usage",
+            {
+                "model": "claude-haiku-4-5-20251001",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+            },
+        )
+        self.assertEqual(event["cost_value"], 0)
+        self.assertIsNone(event["cost_unit"])
+
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_claude_api_costs=True))
+        reported = app.usage_from_attrs(
+            "metrics",
+            "claude_code.token.usage",
+            {
+                "model": "claude-haiku-4-5-20251001",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+                "cost_usd": "0.19",
+            },
+            config,
+        )
+        self.assertEqual(reported["cost_value"], 0.19)
+        self.assertEqual(reported["cost_unit"], "USD")
+
     def test_extracts_observed_openrouter_broadcast_fields(self):
         body = json.dumps(observed_openrouter_trace_payload()).encode()
         config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
@@ -434,6 +592,25 @@ retain_payload_body = true
             self.assertEqual(config.openrouter_broadcast.required_header_name, "X-OpenRouter-Broadcast-Secret")
             self.assertEqual(config.openrouter_broadcast.required_header_value, "extra-secret")
             self.assertTrue(config.openrouter_broadcast.retain_payload_body)
+
+    def test_load_config_reads_pricing_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[pricing]
+estimate_openai_api_costs = true
+estimate_claude_api_costs = true
+include_reasoning_tokens_as_output = false
+""",
+                encoding="utf-8",
+            )
+
+            config = app.load_config(config_path)
+
+            self.assertTrue(config.pricing.estimate_openai_api_costs)
+            self.assertTrue(config.pricing.estimate_claude_api_costs)
+            self.assertFalse(config.pricing.include_reasoning_tokens_as_output)
 
     def test_load_config_keeps_legacy_server_section_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1220,16 +1397,41 @@ class ServerHttpTests(unittest.TestCase):
             con = app.connect_server(Path(tmp) / "server.sqlite")
             app.insert_broadcast_payload(con, "/v1/traces", "application/json", body, config, status="ingested")
             self.assertEqual(app.ingest_openrouter_broadcast(con, body, config), (1, 0))
+            con.execute(
+                """
+                update usage_events
+                set cost_value = 0,
+                    cost_unit = null,
+                    workspace_label = null,
+                    api_key_label = null,
+                    provider_name = null
+                where client_name = ?
+                """,
+                (app.OPENROUTER_BROADCAST_CLIENT,),
+            )
 
             result = app.replay_broadcast_payloads(con, config, replay_status="ingested")
             con.commit()
 
             row_count = con.execute("select count(*) from usage_events").fetchone()[0]
+            usage = con.execute(
+                """
+                select cost_value, cost_unit, workspace_label, api_key_label, provider_name
+                from usage_events
+                where client_name = ?
+                """,
+                (app.OPENROUTER_BROADCAST_CLIENT,),
+            ).fetchone()
             payload = con.execute("select replay_status, replayed_at, last_error from broadcast_payloads").fetchone()
             con.close()
 
             self.assertEqual(result, {"payloads": 1, "accepted": 0, "duplicates": 1, "errors": 0})
             self.assertEqual(row_count, 1)
+            self.assertAlmostEqual(usage["cost_value"], 0.0123)
+            self.assertEqual(usage["cost_unit"], "credits")
+            self.assertEqual(usage["workspace_label"], "agents")
+            self.assertEqual(usage["api_key_label"], "prod-key")
+            self.assertEqual(usage["provider_name"], "OpenAI")
             self.assertEqual(payload["replay_status"], "replayed")
             self.assertIsNotNone(payload["replayed_at"])
             self.assertIsNone(payload["last_error"])

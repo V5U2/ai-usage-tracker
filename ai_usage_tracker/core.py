@@ -233,6 +233,42 @@ TOOL_EVENT_NAMES = {
 VERBOSE_TOOL_ATTRS = {"arguments", "output"}
 OPENROUTER_BROADCAST_CLIENT = "openrouter-broadcast"
 OPENROUTER_SOURCE_KIND = "openrouter_broadcast"
+OPENAI_API_MODEL_PRICES_USD_PER_1M: dict[str, tuple[float, float, float]] = {
+    # model/prefix: (input, cached input, output)
+    "gpt-5.5": (5.00, 0.50, 30.00),
+    "gpt-5.4-mini": (0.75, 0.075, 4.50),
+    "gpt-5.4-nano": (0.20, 0.02, 1.25),
+    "gpt-5.4": (2.50, 0.25, 15.00),
+    "gpt-5.3-codex": (1.75, 0.175, 14.00),
+    "gpt-5.3-chat": (1.75, 0.175, 14.00),
+    "gpt-5.3": (1.75, 0.175, 14.00),
+    "gpt-5.2-codex": (1.75, 0.175, 14.00),
+    "gpt-5.1-codex-mini": (0.25, 0.025, 2.00),
+    "gpt-5.1-codex-max": (1.25, 0.125, 10.00),
+    "gpt-5.1-codex": (1.25, 0.125, 10.00),
+    "gpt-5-codex": (1.25, 0.125, 10.00),
+    "gpt-5-chat": (1.25, 0.125, 10.00),
+    "gpt-5-nano": (0.05, 0.005, 0.40),
+    "gpt-5": (1.25, 0.125, 10.00),
+}
+CLAUDE_API_MODEL_PRICES_USD_PER_1M: dict[str, tuple[float, float, float, float, float]] = {
+    # model/prefix: (input, 5m cache write, 1h cache write, cache hit/read, output)
+    "claude-opus-4.7": (5.00, 6.25, 10.00, 0.50, 25.00),
+    "claude-opus-4.6": (5.00, 6.25, 10.00, 0.50, 25.00),
+    "claude-opus-4.5": (5.00, 6.25, 10.00, 0.50, 25.00),
+    "claude-opus-4.1": (15.00, 18.75, 30.00, 1.50, 75.00),
+    "claude-opus-4": (15.00, 18.75, 30.00, 1.50, 75.00),
+    "claude-sonnet-4.6": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "claude-sonnet-4.5": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "claude-sonnet-4": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "claude-3-7-sonnet": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "claude-3.7-sonnet": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "claude-haiku-4.5": (1.00, 1.25, 2.00, 0.10, 5.00),
+    "claude-3-5-haiku": (0.80, 1.00, 1.60, 0.08, 4.00),
+    "claude-3.5-haiku": (0.80, 1.00, 1.60, 0.08, 4.00),
+    "claude-3-opus": (15.00, 18.75, 30.00, 1.50, 75.00),
+    "claude-3-haiku": (0.25, 0.30, 0.50, 0.03, 1.25),
+}
 COST_UNIT_REPORT_GROUPS = {
     "client",
     "client-model",
@@ -286,12 +322,20 @@ class OpenRouterBroadcastConfig:
 
 
 @dataclass(frozen=True)
+class PricingConfig:
+    estimate_openai_api_costs: bool = False
+    estimate_claude_api_costs: bool = False
+    include_reasoning_tokens_as_output: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     client_name: str = "local"
     storage: StorageConfig = field(default_factory=StorageConfig)
     server: RemoteServerConfig = field(default_factory=RemoteServerConfig)
     central: ServerConfig = field(default_factory=ServerConfig)
     openrouter_broadcast: OpenRouterBroadcastConfig = field(default_factory=OpenRouterBroadcastConfig)
+    pricing: PricingConfig = field(default_factory=PricingConfig)
     redaction_keys: frozenset[str] = frozenset(SENSITIVE_ATTR_KEYS)
     redaction_key_parts: tuple[str, ...] = SENSITIVE_ATTR_PARTS
 
@@ -382,6 +426,10 @@ def parse_basic_toml_value(value: str) -> Any:
         return [parse_basic_toml_value(item.strip()) for item in body.split(",") if item.strip()]
     try:
         return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
     except ValueError as exc:
         raise ValueError(f"unsupported TOML value: {value}") from exc
 
@@ -445,6 +493,7 @@ def load_config(path: Path | None) -> AppConfig:
     collector_data = merged_table_config(data, "server", "collector")
     aggregation_data = merged_table_config(data, "central_server", "aggregation_server")
     openrouter_data = table_config(data, "openrouter_broadcast")
+    pricing_data = table_config(data, "pricing")
     redaction_data = table_config(data, "redaction")
 
     extracted_attributes = storage_data.get("extracted_attributes", "redacted")
@@ -480,12 +529,18 @@ def load_config(path: Path | None) -> AppConfig:
         required_header_value=optional_str_config(openrouter_data, "required_header_value"),
         retain_payload_body=bool_config(openrouter_data, "retain_payload_body", True),
     )
+    pricing = PricingConfig(
+        estimate_openai_api_costs=bool_config(pricing_data, "estimate_openai_api_costs", False),
+        estimate_claude_api_costs=bool_config(pricing_data, "estimate_claude_api_costs", False),
+        include_reasoning_tokens_as_output=bool_config(pricing_data, "include_reasoning_tokens_as_output", True),
+    )
     return AppConfig(
         client_name=str_config(data, "client_name", "local"),
         storage=storage,
         server=remote_server,
         central=central,
         openrouter_broadcast=openrouter_broadcast,
+        pricing=pricing,
         redaction_keys=frozenset(key.lower() for key in list_config(redaction_data, "keys", SENSITIVE_ATTR_KEYS)),
         redaction_key_parts=tuple(
             part.lower() for part in list_config(redaction_data, "key_parts", SENSITIVE_ATTR_PARTS)
@@ -901,6 +956,107 @@ def stored_tool_attributes_json(attrs: dict[str, Any], config: AppConfig) -> str
     return stored_attributes_json(compact_attrs, config)
 
 
+def normalize_model_name(model: str | None) -> str:
+    return (model or "").strip().lower()
+
+
+def model_name_variants(model: str | None) -> tuple[str, ...]:
+    normalized = normalize_model_name(model)
+    if not normalized:
+        return ()
+    variants = [normalized]
+    dotted_parts = normalized.split("-")
+    for index in range(len(dotted_parts) - 1):
+        if dotted_parts[index].isdigit() and dotted_parts[index + 1].isdigit():
+            variants.append(
+                "-".join(
+                    (
+                        *dotted_parts[:index],
+                        f"{dotted_parts[index]}.{dotted_parts[index + 1]}",
+                        *dotted_parts[index + 2 :],
+                    )
+                )
+            )
+    return tuple(dict.fromkeys(variants))
+
+
+def openai_api_price_for_model(model: str | None) -> tuple[float, float, float] | None:
+    variants = model_name_variants(model)
+    if not variants:
+        return None
+    for normalized in variants:
+        if normalized in OPENAI_API_MODEL_PRICES_USD_PER_1M:
+            return OPENAI_API_MODEL_PRICES_USD_PER_1M[normalized]
+    prices = sorted(OPENAI_API_MODEL_PRICES_USD_PER_1M.items(), key=lambda item: len(item[0]), reverse=True)
+    for normalized in variants:
+        for prefix, price in prices:
+            if normalized.startswith(prefix + "-") or normalized.startswith(prefix + "."):
+                return price
+    return None
+
+
+def claude_api_price_for_model(model: str | None) -> tuple[float, float, float, float, float] | None:
+    variants = model_name_variants(model)
+    if not variants:
+        return None
+    for normalized in variants:
+        if normalized in CLAUDE_API_MODEL_PRICES_USD_PER_1M:
+            return CLAUDE_API_MODEL_PRICES_USD_PER_1M[normalized]
+    prices = sorted(CLAUDE_API_MODEL_PRICES_USD_PER_1M.items(), key=lambda item: len(item[0]), reverse=True)
+    for normalized in variants:
+        for prefix, price in prices:
+            if normalized.startswith(prefix + "-") or normalized.startswith(prefix + "."):
+                return price
+    return None
+
+
+def estimate_openai_api_cost(
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int,
+    reasoning_tokens: int,
+    config: AppConfig,
+) -> float:
+    price = openai_api_price_for_model(model)
+    if not price:
+        return 0.0
+    input_rate, cached_input_rate, output_rate = price
+    cached_billable = min(max(cached_tokens, 0), max(input_tokens, 0))
+    uncached_input = max(input_tokens - cached_billable, 0)
+    output_billable = max(output_tokens, 0)
+    if config.pricing.include_reasoning_tokens_as_output:
+        output_billable += max(reasoning_tokens, 0)
+    return (
+        uncached_input * input_rate
+        + cached_billable * cached_input_rate
+        + output_billable * output_rate
+    ) / 1_000_000
+
+
+def estimate_claude_api_cost(
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
+) -> float:
+    price = claude_api_price_for_model(model)
+    if not price:
+        return 0.0
+    input_rate, cache_write_5m_rate, _cache_write_1h_rate, cache_read_rate, output_rate = price
+    cache_read_billable = max(cache_read_tokens, 0)
+    cache_write_billable = max(cache_creation_tokens, 0)
+    cache_adjusted_tokens = cache_read_billable + cache_write_billable
+    uncached_input = max(input_tokens - cache_adjusted_tokens, 0)
+    return (
+        uncached_input * input_rate
+        + cache_write_billable * cache_write_5m_rate
+        + cache_read_billable * cache_read_rate
+        + max(output_tokens, 0) * output_rate
+    ) / 1_000_000
+
+
 def has_token_signal(attrs: dict[str, Any]) -> bool:
     keys = set(attrs)
     return any(any(alias in keys for alias in aliases) for aliases in TOKEN_KEYS.values())
@@ -935,6 +1091,11 @@ def usage_from_attrs(
     output_tokens = int_attr(attrs, TOKEN_KEYS["output"])
     total_tokens = int_attr(attrs, TOKEN_KEYS["total"])
     cached_tokens = int_attr(attrs, TOKEN_KEYS["cached"])
+    cache_read_tokens = int_attr(attrs, ("cache_read_tokens", "cache_read_input_tokens", "usage.cache_read_input_tokens"))
+    cache_creation_tokens = int_attr(
+        attrs,
+        ("cache_creation_tokens", "cache_creation_input_tokens", "usage.cache_creation_input_tokens"),
+    )
     reasoning_tokens = int_attr(attrs, TOKEN_KEYS["reasoning"])
     cost_value, cost_alias = float_attr(
         attrs,
@@ -954,7 +1115,7 @@ def usage_from_attrs(
         attrs,
         ("cost_unit", "cost.currency", "gen_ai.usage.cost_unit", "gen_ai.usage.cost_currency", "openrouter.cost_unit"),
     )
-    if cost_value and not cost_unit:
+    if cost_alias is not None and not cost_unit:
         if cost_alias in ("gen_ai.usage.cost_usd", "usage.cost_usd", "cost_usd"):
             cost_unit = "USD"
         else:
@@ -966,12 +1127,36 @@ def usage_from_attrs(
     if total_tokens == 0 and (input_tokens or output_tokens):
         total_tokens = input_tokens + output_tokens
 
+    raw_model = first_attr(attrs, ("model", "model_name", "gen_ai.request.model", "gen_ai.response.model"))
+    model = raw_model if config.storage.model else None
+    if config.pricing.estimate_openai_api_costs and cost_alias is None:
+        estimated_cost = estimate_openai_api_cost(
+            raw_model,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            reasoning_tokens,
+            config,
+        )
+        if estimated_cost:
+            cost_value = estimated_cost
+            cost_unit = "USD"
+    if config.pricing.estimate_claude_api_costs and cost_alias is None:
+        estimated_cost = estimate_claude_api_cost(
+            raw_model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        )
+        if estimated_cost:
+            cost_value = estimated_cost
+            cost_unit = "USD"
+
     return {
         "signal": signal,
         "event_name": event_name,
-        "model": first_attr(attrs, ("model", "model_name", "gen_ai.request.model", "gen_ai.response.model"))
-        if config.storage.model
-        else None,
+        "model": model,
         "session_id": first_attr(attrs, ("session_id", "session.id", "codex.session_id"))
         if config.storage.session_id
         else None,
@@ -3270,8 +3455,15 @@ def ingest_openrouter_broadcast(
     con: sqlite3.Connection,
     body: bytes,
     config: AppConfig,
+    *,
+    update_existing: bool = False,
 ) -> tuple[int, int]:
-    return ingest_usage_events(con, OPENROUTER_BROADCAST_CLIENT, normalize_openrouter_broadcast(body, config))
+    return ingest_usage_events(
+        con,
+        OPENROUTER_BROADCAST_CLIENT,
+        normalize_openrouter_broadcast(body, config),
+        update_existing=update_existing,
+    )
 
 
 def replay_broadcast_payloads(
@@ -3325,7 +3517,7 @@ def replay_broadcast_payloads(
             )
             continue
         try:
-            row_accepted, row_duplicates = ingest_openrouter_broadcast(con, body, config)
+            row_accepted, row_duplicates = ingest_openrouter_broadcast(con, body, config, update_existing=True)
             accepted += row_accepted
             duplicates += row_duplicates
             con.execute(
@@ -3341,7 +3533,13 @@ def replay_broadcast_payloads(
     return {"payloads": payloads, "accepted": accepted, "duplicates": duplicates, "errors": errors}
 
 
-def ingest_usage_events(con: sqlite3.Connection, client_name: str, events: Sequence[dict[str, Any]]) -> tuple[int, int]:
+def ingest_usage_events(
+    con: sqlite3.Connection,
+    client_name: str,
+    events: Sequence[dict[str, Any]],
+    *,
+    update_existing: bool = False,
+) -> tuple[int, int]:
     accepted = 0
     duplicates = 0
     received_at = now_iso()
@@ -3385,6 +3583,57 @@ def ingest_usage_events(con: sqlite3.Connection, client_name: str, events: Seque
             )
             accepted += 1
         except sqlite3.IntegrityError:
+            if update_existing:
+                con.execute(
+                    """
+                    update usage_events
+                    set source_received_at = ?,
+                        signal = ?,
+                        event_name = ?,
+                        model = ?,
+                        session_id = ?,
+                        thread_id = ?,
+                        input_tokens = ?,
+                        output_tokens = ?,
+                        total_tokens = ?,
+                        cached_tokens = ?,
+                        reasoning_tokens = ?,
+                        source_kind = ?,
+                        trace_id = ?,
+                        span_id = ?,
+                        workspace_label = ?,
+                        api_key_label = ?,
+                        provider_name = ?,
+                        cost_value = ?,
+                        cost_unit = ?,
+                        attributes_json = ?
+                    where client_name = ? and client_event_id = ?
+                    """,
+                    (
+                        str(event.get("received_at") or received_at),
+                        str(event.get("signal") or "logs"),
+                        event.get("event_name"),
+                        event.get("model"),
+                        event.get("session_id"),
+                        event.get("thread_id"),
+                        int(event.get("input_tokens") or 0),
+                        int(event.get("output_tokens") or 0),
+                        int(event.get("total_tokens") or 0),
+                        int(event.get("cached_tokens") or 0),
+                        int(event.get("reasoning_tokens") or 0),
+                        event.get("source_kind"),
+                        event.get("trace_id"),
+                        event.get("span_id"),
+                        event.get("workspace_label"),
+                        event.get("api_key_label"),
+                        event.get("provider_name"),
+                        float(event.get("cost_value") or 0),
+                        event.get("cost_unit"),
+                        str(event.get("attributes_json") or "{}"),
+                        client_name,
+                        str(event["client_event_id"]),
+                    ),
+                )
             duplicates += 1
     con.execute("update clients set last_seen_at = ?, updated_at = ? where client_name = ?", (received_at, received_at, client_name))
     return accepted, duplicates
