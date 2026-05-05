@@ -896,3 +896,7 @@ docker exec ai-usage-tracker python ai_usage_tracker.py \
   server backfill-costs \
   --server-db /data/ai_usage_server.sqlite
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
