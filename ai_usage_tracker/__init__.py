@@ -8,3 +8,6 @@ Component packages:
 """
 
 from .core import *  # noqa: F401,F403
+from .core import APP_VERSION
+
+__version__ = APP_VERSION

@@ -132,6 +132,12 @@ Check that it is listening:
 ss -ltnp | rg ':4318'
 ```
 
+Check the installed collector version:
+
+```bash
+python3 ai_usage_tracker.py client version
+```
+
 Optional: use a config file to control what gets persisted:
 
 ```bash

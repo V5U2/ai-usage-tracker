@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -140,6 +141,18 @@ class ComponentLayoutTests(unittest.TestCase):
     def test_legacy_component_modules_remain_compatible(self):
         self.assertIs(client_compat.Receiver, collector.Receiver)
         self.assertIs(server_compat.ServerReceiver, aggregation_server.ServerReceiver)
+
+    def test_version_commands_print_package_version(self):
+        for argv in (
+            ["ai_usage_tracker.py", "version"],
+            ["ai_usage_tracker.py", "client", "version"],
+            ["ai_usage_tracker.py", "server", "version"],
+        ):
+            with self.subTest(argv=argv):
+                out = io.StringIO()
+                with patch.object(app.sys, "argv", argv), redirect_stdout(out):
+                    self.assertEqual(app.main(), 0)
+                self.assertEqual(out.getvalue().strip(), f"ai-usage-tracker {app.APP_VERSION}")
 
     def test_default_path_prefers_generic_names_and_keeps_legacy_fallback(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
@@ -1250,6 +1263,8 @@ class ServerHttpTests(unittest.TestCase):
         self.assertIn('localStorage.getItem("ait-theme")', body)
         self.assertIn('rel="icon" type="image/svg+xml"', body)
         self.assertIn("M5%209.2H7V19H5V9.2", body)
+        self.assertIn(f"AI Usage Tracker v{app.APP_VERSION}", body)
+        self.assertIn('class="app-footer"', body)
 
     def test_server_ingest_auth_duplicate_and_revoked_token(self):
         with tempfile.TemporaryDirectory() as tmp:

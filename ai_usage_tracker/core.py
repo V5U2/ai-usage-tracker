@@ -33,6 +33,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
     tomllib = None  # type: ignore[assignment]
 
+APP_VERSION = "0.4.0"
+
+
 def default_path(primary_env: str, legacy_env: str, default_name: str, legacy_name: str) -> Path:
     if os.environ.get(primary_env):
         return Path(os.environ[primary_env])
@@ -1969,6 +1972,10 @@ def server_nav(active: str) -> str:
     )
 
 
+def server_footer() -> str:
+    return f'<footer class="app-footer">AI Usage Tracker v{html.escape(APP_VERSION)}</footer>'
+
+
 def server_theme_script() -> str:
     return """
 (function () {
@@ -2072,6 +2079,7 @@ def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
     .value {{ font-size: 1.2rem; font-weight: 650; }}
     .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
     label {{ display: grid; gap: .25rem; }}
+    .app-footer {{ margin-top: 2rem; color: var(--muted); font-size: .8rem; }}
 {extra}"""
 
 
@@ -2324,6 +2332,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       <tbody>{''.join(table_rows) or empty_row}</tbody>
     </table>
   </main>
+  {server_footer()}
 </body>
 </html>"""
 
@@ -2439,6 +2448,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </table>
     </section>
   </main>
+  {server_footer()}
 </body>
 </html>"""
 
@@ -2541,6 +2551,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </table>
     </section>
   </main>
+  {server_footer()}
 </body>
 </html>"""
 
@@ -4112,6 +4123,10 @@ def samples(args: argparse.Namespace) -> None:
         print(json.dumps(dict(row), indent=2))
 
 
+def version(args: argparse.Namespace) -> None:
+    print(f"ai-usage-tracker {APP_VERSION}")
+
+
 def add_report_filters(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--since", help="UTC timestamp or YYYY-MM-DD lower bound")
     parser.add_argument("--until", help="UTC timestamp or YYYY-MM-DD upper bound")
@@ -4223,6 +4238,9 @@ def main() -> int:
     p_samples.add_argument("--limit", type=int, default=10)
     p_samples.set_defaults(func=samples)
 
+    p_version = sub.add_parser("version", help="Print version and exit")
+    p_version.set_defaults(func=version)
+
     p_sync = sub.add_parser(
         "sync", parents=[db_parent], help="Forward queued client usage events to the aggregation server"
     )
@@ -4252,6 +4270,9 @@ def main() -> int:
     p_client_sync_status.add_argument("--errors", type=int, default=0, help="Show this many pending sync error groups")
     p_client_sync_status.set_defaults(func=sync_status)
 
+    p_client_version = client_sub.add_parser("version")
+    p_client_version.set_defaults(func=version)
+
     p_server = sub.add_parser("server", help="Aggregation server commands")
     server_sub = p_server.add_subparsers(dest="server_cmd", required=True)
     p_server_serve = server_sub.add_parser("serve", parents=[db_parent])
@@ -4270,6 +4291,9 @@ def main() -> int:
     p_server_replay.add_argument("--limit", type=int)
     p_server_replay.add_argument("--format", choices=("table", "json"), default="table")
     p_server_replay.set_defaults(func=replay_broadcast)
+
+    p_server_version = server_sub.add_parser("version")
+    p_server_version.set_defaults(func=version)
 
     args = parser.parse_args()
     args.func(args)
