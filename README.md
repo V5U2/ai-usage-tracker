@@ -482,8 +482,18 @@ python codex_usage_observer.py --config /data/server.toml server serve \
 ### GitHub Actions releases and images
 
 CI runs on pull requests, pushes to `main`, and manual dispatch. It runs the
-Python unittest suite on Python 3.9 and 3.12, then builds the Docker image
-without pushing it.
+Python unittest suite on Python 3.9 and 3.12, then builds the Docker image.
+Internal pull requests and `main` pushes publish non-release GHCR tags:
+
+```text
+ghcr.io/v5u2/ai-usage-tracker:pr-<number>
+ghcr.io/v5u2/ai-usage-tracker:sha-<shortsha>
+ghcr.io/v5u2/ai-usage-tracker:edge
+```
+
+The `edge` tag is only updated by pushes to `main`. Pull requests publish
+`pr-<number>` plus the immutable commit SHA tag. Forked pull requests build the
+image but do not push to GHCR.
 
 Release publishing runs when a `v*` tag is pushed, or from manual dispatch of
 the `Release` workflow. It builds the server container and pushes it to GitHub
@@ -501,7 +511,9 @@ git push origin v0.1.0
 ```
 
 Published image tags include the release tag. Stable tags without a hyphen also
-update `latest`; prerelease tags such as `v0.1.0-rc.1` do not.
+update `latest`; prerelease tags such as `v0.1.0-rc.1` do not. The `latest` tag
+is reserved for stable releases and is not updated by ordinary commits or pull
+requests.
 
 Manual releases can be started from the GitHub Actions UI with a `tag` input.
 The release workflow also creates or updates the matching GitHub Release with
