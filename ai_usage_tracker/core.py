@@ -1091,7 +1091,7 @@ def usage_from_attrs(
         attrs,
         ("cost_unit", "cost.currency", "gen_ai.usage.cost_unit", "gen_ai.usage.cost_currency", "openrouter.cost_unit"),
     )
-    if cost_value and not cost_unit:
+    if cost_alias is not None and not cost_unit:
         if cost_alias in ("gen_ai.usage.cost_usd", "usage.cost_usd", "cost_usd"):
             cost_unit = "USD"
         else:
@@ -1103,10 +1103,11 @@ def usage_from_attrs(
     if total_tokens == 0 and (input_tokens or output_tokens):
         total_tokens = input_tokens + output_tokens
 
-    model = first_attr(attrs, ("model", "model_name", "gen_ai.request.model", "gen_ai.response.model")) if config.storage.model else None
-    if config.pricing.estimate_openai_api_costs and not cost_value:
+    raw_model = first_attr(attrs, ("model", "model_name", "gen_ai.request.model", "gen_ai.response.model"))
+    model = raw_model if config.storage.model else None
+    if config.pricing.estimate_openai_api_costs and cost_alias is None:
         estimated_cost = estimate_openai_api_cost(
-            model,
+            raw_model,
             input_tokens,
             output_tokens,
             cached_tokens,
@@ -1116,9 +1117,9 @@ def usage_from_attrs(
         if estimated_cost:
             cost_value = estimated_cost
             cost_unit = "USD"
-    if config.pricing.estimate_claude_api_costs and not cost_value:
+    if config.pricing.estimate_claude_api_costs and cost_alias is None:
         estimated_cost = estimate_claude_api_cost(
-            model,
+            raw_model,
             input_tokens,
             output_tokens,
             cache_read_tokens,

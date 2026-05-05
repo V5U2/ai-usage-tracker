@@ -262,6 +262,45 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(reported["cost_value"], 0.42)
         self.assertEqual(reported["cost_unit"], "USD")
 
+    def test_openai_api_cost_estimation_preserves_reported_zero_cost(self):
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_openai_api_costs=True))
+
+        event = app.usage_from_attrs(
+            "logs",
+            "response.completed",
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+                "cost_usd": "0",
+            },
+            config,
+        )
+
+        self.assertEqual(event["cost_value"], 0)
+        self.assertEqual(event["cost_unit"], "USD")
+
+    def test_openai_api_cost_estimation_does_not_require_model_storage(self):
+        config = app.AppConfig(
+            storage=app.StorageConfig(model=False),
+            pricing=app.PricingConfig(estimate_openai_api_costs=True),
+        )
+
+        event = app.usage_from_attrs(
+            "logs",
+            "response.completed",
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+            },
+            config,
+        )
+
+        self.assertIsNone(event["model"])
+        self.assertAlmostEqual(event["cost_value"], 1.2)
+        self.assertEqual(event["cost_unit"], "USD")
+
     def test_can_estimate_claude_api_cost_when_enabled(self):
         config = app.AppConfig(pricing=app.PricingConfig(estimate_claude_api_costs=True))
 
