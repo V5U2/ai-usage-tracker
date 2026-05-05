@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 
 INSTALL_DIR=${INSTALL_DIR:-"$HOME/Library/Application Support/ai-usage-tracker"}
-CONFIG_PATH=${CONFIG_PATH:-"$INSTALL_DIR/codex_usage_observer.toml"}
+CONFIG_PATH=${CONFIG_PATH:-"$INSTALL_DIR/ai_usage_tracker.toml"}
 LOG_DIR=${LOG_DIR:-"$HOME/Library/Logs/ai-usage-tracker"}
 LABEL=${LABEL:-"com.$(id -un).ai-usage-tracker.collector"}
 PLIST_PATH=${PLIST_PATH:-"$HOME/Library/LaunchAgents/$LABEL.plist"}
@@ -26,6 +26,7 @@ fi
 
 mkdir -p "$INSTALL_DIR" "$LOG_DIR" "$(dirname "$PLIST_PATH")"
 cp "$REPO_ROOT/codex_usage_observer.py" "$INSTALL_DIR/"
+cp "$REPO_ROOT/ai_usage_tracker.py" "$INSTALL_DIR/"
 rm -rf "$INSTALL_DIR/codex_usage_tracker" "$INSTALL_DIR/ai_usage_tracker"
 cp -R "$REPO_ROOT/ai_usage_tracker" "$INSTALL_DIR/"
 
@@ -72,7 +73,7 @@ cat > "$PLIST_PATH" <<EOF
   <key>ProgramArguments</key>
   <array>
     <string>$PYTHON_BIN</string>
-    <string>$INSTALL_DIR/codex_usage_observer.py</string>
+    <string>$INSTALL_DIR/ai_usage_tracker.py</string>
     <string>--config</string>
     <string>$CONFIG_PATH</string>
     <string>client</string>

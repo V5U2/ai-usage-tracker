@@ -1,6 +1,6 @@
 """Collector-side interfaces for local OTLP ingestion and forwarding.
 
-The collector runs the local receiver, extracts usage from Codex OTEL payloads,
+The collector runs the local receiver, extracts usage from AI telemetry payloads,
 stores local SQLite rows, and optionally forwards compact events to an
 aggregation server.
 """
