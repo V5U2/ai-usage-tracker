@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 COPY codex_usage_observer.py /app/
-COPY codex_usage_tracker /app/codex_usage_tracker
+COPY ai_usage_tracker /app/ai_usage_tracker
 COPY docker/server.toml /app/default-server.toml
 COPY docker/entrypoint.sh /app/entrypoint.sh
 

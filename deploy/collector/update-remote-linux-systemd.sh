@@ -18,7 +18,7 @@ for host in "$@"; do
   ssh "$host" "rm -rf '$REMOTE_STAGING_DIR' && mkdir -p '$REMOTE_STAGING_DIR'"
   rsync -a \
     "$REPO_ROOT/codex_usage_observer.py" \
-    "$REPO_ROOT/codex_usage_tracker" \
+    "$REPO_ROOT/ai_usage_tracker" \
     "$REPO_ROOT/deploy/collector/update-linux-systemd.sh" \
     "$host:$REMOTE_STAGING_DIR/"
   ssh "$host" \

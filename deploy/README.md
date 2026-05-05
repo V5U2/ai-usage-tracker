@@ -20,6 +20,8 @@ TEMPLATE_NAME=my-ai-usage-tracker.xml \
 deploy/unraid/install-template.sh
 ```
 
+The template file lives at `deploy/unraid/ai-usage-tracker.xml`.
+
 The template defaults to:
 
 - Repository: `ghcr.io/v5u2/ai-usage-tracker:latest`
@@ -147,7 +149,7 @@ The release workflow publishes a collector tarball named
 It contains:
 
 - `codex_usage_observer.py`
-- `codex_usage_tracker/`
+- `ai_usage_tracker/`
 - `codex_usage_observer.example.toml`
 - `deploy/collector/`
 - `README.md` and `deploy/README.md`
