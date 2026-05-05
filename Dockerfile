@@ -4,8 +4,11 @@ WORKDIR /app
 
 COPY codex_usage_observer.py /app/
 COPY codex_usage_tracker /app/codex_usage_tracker
-COPY docker/server.toml /app/server.toml
+COPY docker/server.toml /app/default-server.toml
+COPY docker/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8318
 
-CMD ["python", "codex_usage_observer.py", "--config", "/app/server.toml", "server", "serve", "--host", "0.0.0.0", "--port", "8318", "--server-db", "/data/codex_usage_server.sqlite", "--allow-remote"]
+CMD ["/app/entrypoint.sh"]

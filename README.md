@@ -441,7 +441,7 @@ for aggregation-server settings are still accepted. Prefer `[collector]` and
 
 The repository includes a Docker setup for the aggregation server component. It
 binds the container service to `127.0.0.1:8318` on the host and stores the
-server SQLite database under `./data/server`.
+server SQLite database plus persistent server config under `./data/server`.
 
 ```bash
 docker compose up -d --build
@@ -464,10 +464,14 @@ Stop the server:
 docker compose down
 ```
 
-The container uses `docker/server.toml` and runs:
+The image packages `docker/server.toml` as a default. On first start, the
+entrypoint copies it to `/data/server.toml`; later starts use the persisted
+`/data/server.toml`, so container upgrades do not overwrite local config.
+
+The container runs:
 
 ```bash
-python codex_usage_observer.py --config /app/server.toml server serve \
+python codex_usage_observer.py --config /data/server.toml server serve \
   --host 0.0.0.0 --port 8318 --server-db /data/codex_usage_server.sqlite \
   --allow-remote
 ```
@@ -505,7 +509,7 @@ unless that release action is intended.
 
 An Unraid Docker template is available at `unraid/ai-usage-tracker.xml`. It
 deploys the aggregation server from GHCR, maps host port `18418` to the
-container's `8318/tcp`, and persists server SQLite data at
+container's `8318/tcp`, and persists server SQLite data plus `server.toml` at
 `/mnt/user/Docker/ai-usage-tracker`.
 
 Install the template on a remote Unraid host:

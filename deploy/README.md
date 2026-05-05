@@ -25,7 +25,8 @@ The template defaults to:
 - Repository: `ghcr.io/v5u2/ai-usage-tracker:latest`
 - Host port: `18418`
 - Container port: `8318`
-- Persistent data: `/mnt/user/Docker/ai-usage-tracker` mounted at `/data`
+- Persistent data and server config: `/mnt/user/Docker/ai-usage-tracker`
+  mounted at `/data`
 
 After the container starts, open:
 
