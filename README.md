@@ -313,14 +313,85 @@ python3 codex_usage_observer.py client sync-status
 python3 codex_usage_observer.py client sync-status --errors 5
 ```
 
-The server accepts compact usage and tool-event batches at `POST /api/v1/usage-events`.
-Open `/reports` in a browser to view token totals grouped by client and model by
-default, with filters for date, client, model, session, grouping, and row limit.
+The server accepts compact usage and tool-event batches from collectors at
+`POST /api/v1/usage-events`. Open `/reports` in a browser to view token totals
+grouped by client and model by default, with filters for date, client, model,
+session, source, workspace, API key, provider, grouping, and row limit.
 Open `/tools` to view Codex tool calls grouped by client and tool. The web UI
 keeps UTC timestamps in the page data and displays them in the browser's local
 time zone. Report APIs are available at `GET /api/v1/reports/usage`,
 `GET /api/v1/reports/tools`, and `GET /api/v1/stats` using
 `Authorization: Bearer <aggregation_server.admin_api_key>`.
+
+### OpenRouter Broadcast ingest
+
+The aggregation server can also accept OpenRouter Broadcast OTLP/HTTP JSON
+traces directly at `POST /v1/traces`. This is separate from collector sync:
+collectors keep using `/api/v1/usage-events`, and Broadcast rows are stored under
+the reserved synthetic client name `openrouter-broadcast`.
+
+Enable the machine-ingest path in the server config:
+
+```toml
+[openrouter_broadcast]
+enabled = true
+api_key = "change-me"
+# Optional exact-match check for a custom header that reaches the origin.
+# Do not use this for Cloudflare Access service-token headers; Cloudflare
+# consumes those at the edge and does not pass them through reliably.
+# required_header_name = "X-OpenRouter-Broadcast-Secret"
+# required_header_value = "change-me-too"
+retain_payload_body = true
+```
+
+Configure OpenRouter Broadcast with an OpenTelemetry Collector or Webhook
+destination pointing at:
+
+```text
+https://usage.example.com/v1/traces
+```
+
+Use custom headers:
+
+```json
+{
+  "Authorization": "Bearer change-me",
+  "CF-Access-Client-Id": "your.cloudflare.access.client.id",
+  "CF-Access-Client-Secret": "your.cloudflare.access.client.secret"
+}
+```
+
+The `Authorization` header is validated by this app. Cloudflare Access headers
+only get the request through Cloudflare; do not configure app-level validation
+against `CF-Access-Client-Id` or `CF-Access-Client-Secret` because Cloudflare
+does not pass those service-token headers through to the origin reliably.
+
+For privacy, enable OpenRouter Broadcast Privacy Mode when you only need usage,
+cost, model, provider, timing, and metadata. The server never stores raw bearer
+secrets as report dimensions; OpenRouter API-key reporting uses non-secret labels
+or IDs from the trace metadata when available. Secret-shaped attributes in
+`attributes_json` still follow the redaction rules.
+
+OpenRouter-focused report shortcuts are available on `/reports`, including:
+
+```text
+/reports?group_by=workspace&source_kind=openrouter_broadcast
+/reports?group_by=api-key&source_kind=openrouter_broadcast
+/reports?group_by=provider&source_kind=openrouter_broadcast
+```
+
+The default `/reports` view remains `client-model` for collector compatibility.
+
+Retained Broadcast payloads can be replayed after parser changes:
+
+```bash
+python3 codex_usage_observer.py --config codex_usage_observer.toml \
+  server replay-broadcast --replay-status ingested
+```
+
+Useful selectors include `--payload-id`, `--since`, `--until`,
+`--replay-status`, and `--limit`. Replay reuses the live Broadcast parser and is
+idempotent against the derived OpenRouter event id.
 
 ### Cloudflare Access in front of the aggregation server
 
@@ -373,7 +444,7 @@ for aggregation-server settings are still accepted. Prefer `[collector]` and
 
 The repository includes a Docker setup for the aggregation server component. It
 binds the container service to `127.0.0.1:8318` on the host and stores the
-server SQLite database under `./data/server`.
+server SQLite database plus persistent server config under `./data/server`.
 
 ```bash
 docker compose up -d --build
@@ -396,10 +467,14 @@ Stop the server:
 docker compose down
 ```
 
-The container uses `docker/server.toml` and runs:
+The image packages `docker/server.toml` as a default. On first start, the
+entrypoint copies it to `/data/server.toml`; later starts use the persisted
+`/data/server.toml`, so container upgrades do not overwrite local config.
+
+The container runs:
 
 ```bash
-python codex_usage_observer.py --config /app/server.toml server serve \
+python codex_usage_observer.py --config /data/server.toml server serve \
   --host 0.0.0.0 --port 8318 --server-db /data/codex_usage_server.sqlite \
   --allow-remote
 ```
@@ -407,8 +482,18 @@ python codex_usage_observer.py --config /app/server.toml server serve \
 ### GitHub Actions releases and images
 
 CI runs on pull requests, pushes to `main`, and manual dispatch. It runs the
-Python unittest suite on Python 3.9 and 3.12, then builds the Docker image
-without pushing it.
+Python unittest suite on Python 3.9 and 3.12, then builds the Docker image.
+Internal pull requests and `main` pushes publish non-release GHCR tags:
+
+```text
+ghcr.io/v5u2/ai-usage-tracker:pr-<number>
+ghcr.io/v5u2/ai-usage-tracker:sha-<shortsha>
+ghcr.io/v5u2/ai-usage-tracker:edge
+```
+
+The `edge` tag is only updated by pushes to `main`. Pull requests publish
+`pr-<number>` plus the immutable commit SHA tag. Forked pull requests build the
+image but do not push to GHCR.
 
 Release publishing runs when a `v*` tag is pushed, or from manual dispatch of
 the `Release` workflow. It builds the server container and pushes it to GitHub
@@ -426,7 +511,9 @@ git push origin v0.1.0
 ```
 
 Published image tags include the release tag. Stable tags without a hyphen also
-update `latest`; prerelease tags such as `v0.1.0-rc.1` do not.
+update `latest`; prerelease tags such as `v0.1.0-rc.1` do not. The `latest` tag
+is reserved for stable releases and is not updated by ordinary commits or pull
+requests.
 
 Manual releases can be started from the GitHub Actions UI with a `tag` input.
 The release workflow also creates or updates the matching GitHub Release with
@@ -437,7 +524,7 @@ unless that release action is intended.
 
 An Unraid Docker template is available at `unraid/ai-usage-tracker.xml`. It
 deploys the aggregation server from GHCR, maps host port `18418` to the
-container's `8318/tcp`, and persists server SQLite data at
+container's `8318/tcp`, and persists server SQLite data plus `server.toml` at
 `/mnt/user/Docker/ai-usage-tracker`.
 
 Install the template on a remote Unraid host:

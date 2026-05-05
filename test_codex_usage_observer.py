@@ -33,6 +33,64 @@ def log_payload(attrs, body=None):
     }
 
 
+def openrouter_trace_payload(trace_id="trace-1", span_id="span-1", prompt=12, completion=5):
+    return {
+        "resourceSpans": [
+            {
+                "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "openrouter"}}]},
+                "scopeSpans": [
+                    {
+                        "spans": [
+                            {
+                                "traceId": trace_id,
+                                "spanId": span_id,
+                                "name": "chat",
+                                "startTimeUnixNano": "1777856523000000000",
+                                "attributes": [
+                                    {"key": "gen_ai.request.model", "value": {"stringValue": "openai/gpt-4o"}},
+                                    {"key": "gen_ai.usage.input_tokens", "value": {"intValue": str(prompt)}},
+                                    {"key": "gen_ai.usage.output_tokens", "value": {"intValue": str(completion)}},
+                                    {"key": "gen_ai.usage.total_tokens", "value": {"intValue": str(prompt + completion)}},
+                                    {"key": "gen_ai.usage.cost", "value": {"doubleValue": "0.0123"}},
+                                    {"key": "openrouter.provider_name", "value": {"stringValue": "OpenAI"}},
+                                    {"key": "trace.metadata.workspace", "value": {"stringValue": "agents"}},
+                                    {"key": "trace.metadata.api_key_label", "value": {"stringValue": "prod-key"}},
+                                    {"key": "openrouter.api_key", "value": {"stringValue": "sk-secret"}},
+                                ],
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def openrouter_trace_payload_with_time(nanos):
+    payload = openrouter_trace_payload()
+    payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["startTimeUnixNano"] = str(nanos)
+    return payload
+
+
+def observed_openrouter_trace_payload():
+    payload = openrouter_trace_payload()
+    attrs = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+    attrs[:] = [
+        {"key": "gen_ai.request.model", "value": {"stringValue": "moonshotai/kimi-k2.5"}},
+        {"key": "gen_ai.provider.name", "value": {"stringValue": "moonshotai"}},
+        {"key": "gen_ai.system", "value": {"stringValue": "moonshotai"}},
+        {"key": "gen_ai.usage.input_tokens", "value": {"intValue": "15041"}},
+        {"key": "gen_ai.usage.output_tokens", "value": {"intValue": "70"}},
+        {"key": "gen_ai.usage.total_tokens", "value": {"intValue": "15111"}},
+        {"key": "gen_ai.usage.total_cost", "value": {"doubleValue": "0.00639196"}},
+        {"key": "trace.metadata.openrouter.api_key_name", "value": {"stringValue": "prod-key"}},
+        {"key": "trace.metadata.openrouter.entity_id", "value": {"stringValue": "org_123"}},
+        {"key": "trace.metadata.openrouter.provider_name", "value": {"stringValue": "Chutes"}},
+        {"key": "trace.metadata.openrouter.provider_slug", "value": {"stringValue": "chutes/int4"}},
+    ]
+    return payload
+
+
 class ComponentLayoutTests(unittest.TestCase):
     def test_component_packages_expose_expected_surfaces(self):
         self.assertIs(collector.Receiver, core.Receiver)
@@ -80,6 +138,36 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(events[0]["output_tokens"], 5)
         self.assertEqual(events[0]["cached_tokens"], 2)
         self.assertEqual(events[0]["total_tokens"], 8)
+
+    def test_cost_unit_matches_selected_cost_alias(self):
+        event = app.usage_from_attrs(
+            "traces",
+            "chat",
+            {
+                "gen_ai.usage.input_tokens": 1,
+                "gen_ai.usage.output_tokens": 1,
+                "cost": "99",
+                "gen_ai.usage.cost_usd": "0.25",
+            },
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event["cost_value"], 0.25)
+        self.assertEqual(event["cost_unit"], "USD")
+
+    def test_extracts_observed_openrouter_broadcast_fields(self):
+        body = json.dumps(observed_openrouter_trace_payload()).encode()
+        config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
+
+        event = app.normalize_openrouter_broadcast(body, config)[0]
+
+        self.assertEqual(event["model"], "moonshotai/kimi-k2.5")
+        self.assertEqual(event["total_tokens"], 15111)
+        self.assertAlmostEqual(event["cost_value"], 0.00639196)
+        self.assertEqual(event["cost_unit"], "credits")
+        self.assertEqual(event["workspace_label"], "org_123")
+        self.assertEqual(event["api_key_label"], "prod-key")
+        self.assertEqual(event["provider_name"], "Chutes")
 
     def test_redacts_account_metadata_but_keeps_token_counts(self):
         payload = log_payload(
@@ -219,6 +307,29 @@ admin_api_key = "admin"
             self.assertEqual(config.central.port, 18418)
             self.assertEqual(config.central.db, "aggregation.sqlite")
             self.assertEqual(config.central.admin_api_key, "admin")
+
+    def test_load_config_reads_openrouter_broadcast_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[openrouter_broadcast]
+enabled = true
+api_key = "orb_secret"
+required_header_name = "X-OpenRouter-Broadcast-Secret"
+required_header_value = "extra-secret"
+retain_payload_body = true
+""",
+                encoding="utf-8",
+            )
+
+            config = app.load_config(config_path)
+
+            self.assertTrue(config.openrouter_broadcast.enabled)
+            self.assertEqual(config.openrouter_broadcast.api_key, "orb_secret")
+            self.assertEqual(config.openrouter_broadcast.required_header_name, "X-OpenRouter-Broadcast-Secret")
+            self.assertEqual(config.openrouter_broadcast.required_header_value, "extra-secret")
+            self.assertTrue(config.openrouter_broadcast.retain_payload_body)
 
     def test_load_config_keeps_legacy_server_section_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -888,6 +999,253 @@ class ServerHttpTests(unittest.TestCase):
             self.assertFalse(app.authenticate_client(con, "laptop", token))
             con.close()
 
+    def test_openrouter_broadcast_ingest_auth_dedupe_and_fields(self):
+        body = json.dumps(openrouter_trace_payload()).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            handler = object.__new__(app.ServerReceiver)
+            handler.db_path = db
+            handler.app_config = app.AppConfig(
+                openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret")
+            )
+            handler.path = "/v1/traces"
+            handler.headers = {
+                "content-length": str(len(body)),
+                "content-type": "application/json",
+                "authorization": "Bearer orb_secret",
+            }
+            handler.rfile = io.BytesIO(body)
+            handler.wfile = io.BytesIO()
+            responses = []
+            handler.send_response = responses.append
+            handler.send_header = lambda _key, _value: None
+            handler.end_headers = lambda: None
+
+            handler.do_POST()
+            handler.rfile = io.BytesIO(body)
+            handler.wfile = io.BytesIO()
+            handler.do_POST()
+
+            con = app.connect_server(db)
+            rows = con.execute("select * from usage_events").fetchall()
+            payloads = con.execute("select replay_status, length(body) as body_len from broadcast_payloads").fetchall()
+            con.close()
+
+            self.assertEqual(responses, [200, 200])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["client_name"], "openrouter-broadcast")
+            self.assertEqual(rows[0]["client_event_id"], "orb:trace-1:span-1")
+            self.assertEqual(rows[0]["source_received_at"], "2026-05-04T01:02:03+00:00")
+            self.assertEqual(rows[0]["source_kind"], "openrouter_broadcast")
+            self.assertEqual(rows[0]["workspace_label"], "agents")
+            self.assertEqual(rows[0]["api_key_label"], "prod-key")
+            self.assertEqual(rows[0]["provider_name"], "OpenAI")
+            self.assertAlmostEqual(rows[0]["cost_value"], 0.0123)
+            self.assertEqual(rows[0]["cost_unit"], "credits")
+            self.assertEqual([row["replay_status"] for row in payloads], ["ingested", "ingested"])
+            self.assertTrue(all(row["body_len"] > 0 for row in payloads))
+
+    def test_openrouter_broadcast_rejects_invalid_auth(self):
+        body = json.dumps(openrouter_trace_payload()).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            handler = object.__new__(app.ServerReceiver)
+            handler.db_path = Path(tmp) / "server.sqlite"
+            handler.app_config = app.AppConfig(
+                openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret")
+            )
+            handler.path = "/v1/traces"
+            handler.headers = {
+                "content-length": str(len(body)),
+                "content-type": "application/json",
+                "authorization": "Bearer wrong",
+            }
+            handler.rfile = io.BytesIO(body)
+            handler.wfile = io.BytesIO()
+            responses = []
+            handler.send_response = responses.append
+            handler.send_header = lambda _key, _value: None
+            handler.end_headers = lambda: None
+
+            handler.do_POST()
+
+            self.assertEqual(responses, [401])
+
+    def test_openrouter_broadcast_requires_configured_extra_header(self):
+        body = json.dumps(openrouter_trace_payload()).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            handler = object.__new__(app.ServerReceiver)
+            handler.db_path = Path(tmp) / "server.sqlite"
+            handler.app_config = app.AppConfig(
+                openrouter_broadcast=app.OpenRouterBroadcastConfig(
+                    enabled=True,
+                    api_key="orb_secret",
+                    required_header_name="X-OpenRouter-Broadcast-Secret",
+                    required_header_value="extra-secret",
+                )
+            )
+            handler.path = "/v1/traces"
+            handler.headers = {
+                "content-length": str(len(body)),
+                "content-type": "application/json",
+                "authorization": "Bearer orb_secret",
+            }
+            handler.rfile = io.BytesIO(body)
+            handler.wfile = io.BytesIO()
+            responses = []
+            handler.send_response = responses.append
+            handler.send_header = lambda _key, _value: None
+            handler.end_headers = lambda: None
+
+            handler.do_POST()
+            handler.headers = {
+                "content-length": str(len(body)),
+                "content-type": "application/json",
+                "authorization": "Bearer orb_secret",
+                "X-OpenRouter-Broadcast-Secret": "extra-secret",
+            }
+            handler.rfile = io.BytesIO(body)
+            handler.wfile = io.BytesIO()
+            handler.do_POST()
+
+            self.assertEqual(responses, [401, 200])
+
+    def test_replay_broadcast_payloads_is_idempotent_and_updates_metadata(self):
+        body = json.dumps(openrouter_trace_payload()).encode()
+        config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.insert_broadcast_payload(con, "/v1/traces", "application/json", body, config, status="ingested")
+            self.assertEqual(app.ingest_openrouter_broadcast(con, body, config), (1, 0))
+
+            result = app.replay_broadcast_payloads(con, config, replay_status="ingested")
+            con.commit()
+
+            row_count = con.execute("select count(*) from usage_events").fetchone()[0]
+            payload = con.execute("select replay_status, replayed_at, last_error from broadcast_payloads").fetchone()
+            con.close()
+
+            self.assertEqual(result, {"payloads": 1, "accepted": 0, "duplicates": 1, "errors": 0})
+            self.assertEqual(row_count, 1)
+            self.assertEqual(payload["replay_status"], "replayed")
+            self.assertIsNotNone(payload["replayed_at"])
+            self.assertIsNone(payload["last_error"])
+
+    def test_replay_broadcast_payload_filters_normalize_dates(self):
+        body = json.dumps(openrouter_trace_payload()).encode()
+        config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.insert_broadcast_payload(con, "/v1/traces", "application/json", body, config, status="ingested")
+            con.execute(
+                "update broadcast_payloads set received_at = ?",
+                ("2026-05-04T01:02:03+00:00",),
+            )
+
+            result = app.replay_broadcast_payloads(
+                con,
+                config,
+                since="2026-05-04T01:02:03Z",
+                until="2026-05-04",
+                replay_status="ingested",
+            )
+            con.close()
+
+            self.assertEqual(result, {"payloads": 1, "accepted": 1, "duplicates": 0, "errors": 0})
+
+    def test_openrouter_reserved_client_name_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            with self.assertRaises(ValueError):
+                app.create_client_token(con, "openrouter-broadcast", "OpenRouter")
+            con.close()
+
+    def test_collector_ingest_rejects_reserved_openrouter_client_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            con = app.connect_server(db)
+            con.execute(
+                """
+                insert into clients(client_name, display_name, token_hash, created_at, updated_at)
+                values (?, ?, ?, ?, ?)
+                """,
+                ("openrouter-broadcast", "Bad", app.hash_token("bad-token"), app.now_iso(), app.now_iso()),
+            )
+            con.commit()
+            con.close()
+            body = json.dumps({"client_name": "openrouter-broadcast", "events": []}).encode()
+            handler = object.__new__(app.ServerReceiver)
+            handler.db_path = db
+            handler.app_config = app.AppConfig()
+            handler.path = "/api/v1/usage-events"
+            handler.headers = {
+                "content-length": str(len(body)),
+                "content-type": "application/json",
+                "authorization": "Bearer bad-token",
+            }
+            handler.rfile = io.BytesIO(body)
+            handler.wfile = io.BytesIO()
+            responses = []
+            handler.send_response = responses.append
+            handler.send_header = lambda _key, _value: None
+            handler.end_headers = lambda: None
+
+            handler.do_POST()
+
+            self.assertEqual(responses, [400])
+
+    def test_openrouter_broadcast_detects_orphaned_reserved_usage_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.ingest_usage_events(
+                con,
+                "openrouter-broadcast",
+                [
+                    {
+                        "client_event_id": "legacy-1",
+                        "received_at": "2026-05-04T01:02:03+00:00",
+                        "signal": "logs",
+                        "model": "legacy",
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "attributes_json": "{}",
+                    }
+                ],
+            )
+            con.commit()
+
+            with self.assertRaises(ValueError):
+                app.ensure_no_openrouter_client_conflict(con)
+            con.close()
+
+    def test_replay_broadcast_payloads_rejects_reserved_usage_conflict(self):
+        body = json.dumps(openrouter_trace_payload()).encode()
+        config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.insert_broadcast_payload(con, "/v1/traces", "application/json", body, config, status="ingested")
+            app.ingest_usage_events(
+                con,
+                "openrouter-broadcast",
+                [
+                    {
+                        "client_event_id": "legacy-1",
+                        "received_at": "2026-05-04T01:02:03+00:00",
+                        "signal": "logs",
+                        "model": "legacy",
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "attributes_json": "{}",
+                    }
+                ],
+            )
+            con.commit()
+
+            with self.assertRaises(ValueError):
+                app.replay_broadcast_payloads(con, config, replay_status="ingested")
+            con.close()
+
     def test_server_ingests_and_reports_tool_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "server.sqlite"
@@ -963,6 +1321,10 @@ class ServerHttpTests(unittest.TestCase):
                 model=None,
                 session_id=None,
                 client_name=None,
+                source_kind=None,
+                workspace_label=None,
+                api_key_label=None,
+                provider_name=None,
                 limit=100,
             )
             rows = app.server_report_rows(con, args)
@@ -1002,12 +1364,193 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("Usage Reports", body)
             self.assertSharedNav(body, "usage")
             self.assertIn('<option value="client-model" selected>client-model</option>', body)
+            self.assertIn("/reports?group_by=workspace&source_kind=openrouter_broadcast", body)
+            self.assertIn("/reports?group_by=api-key&source_kind=openrouter_broadcast", body)
             self.assertIn("<td>Laptop</td>", body)
             self.assertNotIn("<td>laptop</td>", body)
             self.assertIn("<td>gpt-test</td>", body)
             self.assertIn("<td class=\"num\">15</td>", body)
             self.assertIn('data-utc="2026-05-04T01:02:03+00:00"', body)
             self.assertIn("formatBrowserTimes", body)
+            con.close()
+
+    def test_server_reports_group_openrouter_by_workspace(self):
+        body = json.dumps(openrouter_trace_payload()).encode()
+        config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            self.assertEqual(app.ingest_openrouter_broadcast(con, body, config), (1, 0))
+            con.commit()
+            args = argparse.Namespace(
+                group_by="workspace",
+                since=None,
+                until=None,
+                model=None,
+                session_id=None,
+                client_name=None,
+                source_kind="openrouter_broadcast",
+                workspace_label=None,
+                api_key_label=None,
+                provider_name=None,
+                limit=100,
+            )
+            rows = app.server_report_rows(con, args)
+            con.close()
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["workspace_label"], "agents")
+            self.assertEqual(rows[0]["total_tokens"], 17)
+            self.assertAlmostEqual(rows[0]["cost_value"], 0.0123)
+            self.assertEqual(rows[0]["cost_unit"], "credits")
+
+    def test_server_reports_do_not_mix_cost_units(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            for unit in ("credits", "USD"):
+                app.ingest_usage_events(
+                    con,
+                    "client-a",
+                    [
+                        {
+                            "client_event_id": f"evt-{unit}",
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "traces",
+                            "model": "gpt-test",
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2,
+                            "cost_value": 1.5,
+                            "cost_unit": unit,
+                            "attributes_json": "{}",
+                        }
+                    ],
+                )
+            con.commit()
+            args = argparse.Namespace(
+                group_by="client",
+                since=None,
+                until=None,
+                model=None,
+                session_id=None,
+                client_name=None,
+                source_kind=None,
+                workspace_label=None,
+                api_key_label=None,
+                provider_name=None,
+                limit=100,
+            )
+            rows = app.server_report_rows(con, args)
+            con.close()
+
+            self.assertEqual({row["cost_unit"] for row in rows}, {"credits", "USD"})
+            self.assertTrue(all(row["cost_value"] == 1.5 for row in rows))
+
+    def test_server_reports_do_not_split_hidden_cost_units(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            for unit in ("credits", "USD"):
+                app.ingest_usage_events(
+                    con,
+                    "client-a",
+                    [
+                        {
+                            "client_event_id": f"hidden-cost-{unit}",
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "traces",
+                            "model": "gpt-test",
+                            "session_id": "session-1",
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2,
+                            "cost_value": 1.5,
+                            "cost_unit": unit,
+                            "attributes_json": "{}",
+                        }
+                    ],
+                )
+            con.commit()
+            base = {
+                "since": None,
+                "until": None,
+                "model": None,
+                "session_id": None,
+                "client_name": None,
+                "source_kind": None,
+                "workspace_label": None,
+                "api_key_label": None,
+                "provider_name": None,
+                "limit": 100,
+            }
+
+            for group_by in ("total", "model", "session"):
+                rows = app.server_report_rows(con, argparse.Namespace(group_by=group_by, **base))
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["total_tokens"], 4)
+                self.assertIsNone(rows[0]["cost_value"])
+                self.assertEqual(rows[0]["cost_unit"], "mixed")
+            con.close()
+
+    def test_server_report_filters_preserve_subsecond_precision(self):
+        body = json.dumps(openrouter_trace_payload_with_time(1777856523123456000)).encode()
+        config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.ingest_openrouter_broadcast(con, body, config)
+            con.commit()
+
+            before = argparse.Namespace(
+                group_by="workspace",
+                since="2026-05-04T01:02:03.500000Z",
+                until=None,
+                model=None,
+                session_id=None,
+                client_name=None,
+                source_kind="openrouter_broadcast",
+                workspace_label=None,
+                api_key_label=None,
+                provider_name=None,
+                limit=100,
+            )
+            through = argparse.Namespace(
+                group_by="workspace",
+                since=None,
+                until="2026-05-04T01:02:03.500000Z",
+                model=None,
+                session_id=None,
+                client_name=None,
+                source_kind="openrouter_broadcast",
+                workspace_label=None,
+                api_key_label=None,
+                provider_name=None,
+                limit=100,
+            )
+
+            self.assertEqual(app.server_report_rows(con, before), [])
+            self.assertEqual(len(app.server_report_rows(con, through)), 1)
+            con.close()
+
+    def test_date_only_until_includes_subsecond_end_of_day(self):
+        body = json.dumps(openrouter_trace_payload_with_time(1777939199123456000)).encode()
+        config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.ingest_openrouter_broadcast(con, body, config)
+            con.commit()
+            args = argparse.Namespace(
+                group_by="workspace",
+                since=None,
+                until="2026-05-04",
+                model=None,
+                session_id=None,
+                client_name=None,
+                source_kind="openrouter_broadcast",
+                workspace_label=None,
+                api_key_label=None,
+                provider_name=None,
+                limit=100,
+            )
+
+            self.assertEqual(len(app.server_report_rows(con, args)), 1)
             con.close()
 
     def test_tool_reports_page_renders_tool_totals(self):

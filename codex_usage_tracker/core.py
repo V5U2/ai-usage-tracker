@@ -153,6 +153,21 @@ DISPLAY_NAMES = {
     "newest_local": "newest_local",
     "newest_synced": "newest_synced",
     "last_synced_at": "last_sync",
+    "source_kind": "source",
+    "workspace_label": "workspace",
+    "api_key_label": "api_key",
+    "provider_name": "provider",
+    "cost_value": "cost",
+    "cost_unit": "unit",
+    "trace_id": "trace",
+    "span_id": "span",
+    "replay_status": "status",
+    "replayed_at": "replayed",
+    "last_error": "last_error",
+    "payloads": "payloads",
+    "accepted": "accepted",
+    "duplicates": "duplicates",
+    "errors": "errors",
 }
 NUMERIC_COLUMNS = {
     "events",
@@ -171,11 +186,28 @@ NUMERIC_COLUMNS = {
     "synced_rows",
     "pending_rows",
     "error_rows",
+    "payloads",
+    "accepted",
+    "duplicates",
+    "errors",
 }
-TIME_COLUMNS = {"first_seen", "last_seen", "source_received_at", "newest_local", "newest_synced", "last_synced_at"}
+COST_COLUMNS = {"cost_value"}
+TIME_COLUMNS = {"first_seen", "last_seen", "source_received_at", "newest_local", "newest_synced", "last_synced_at", "replayed_at"}
 HTML_TIME_COLUMNS = TIME_COLUMNS | {"created_at", "updated_at", "revoked_at"}
 TOOL_EVENT_NAMES = {"codex.tool_decision", "codex.tool_result"}
 VERBOSE_TOOL_ATTRS = {"arguments", "output"}
+OPENROUTER_BROADCAST_CLIENT = "openrouter-broadcast"
+OPENROUTER_SOURCE_KIND = "openrouter_broadcast"
+COST_UNIT_REPORT_GROUPS = {
+    "client",
+    "client-model",
+    "day-client",
+    "day-model-client",
+    "source",
+    "workspace",
+    "api-key",
+    "provider",
+}
 
 
 @dataclass(frozen=True)
@@ -207,11 +239,21 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
+class OpenRouterBroadcastConfig:
+    enabled: bool = False
+    api_key: str | None = None
+    required_header_name: str | None = None
+    required_header_value: str | None = None
+    retain_payload_body: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     client_name: str = "local"
     storage: StorageConfig = field(default_factory=StorageConfig)
     server: RemoteServerConfig = field(default_factory=RemoteServerConfig)
     central: ServerConfig = field(default_factory=ServerConfig)
+    openrouter_broadcast: OpenRouterBroadcastConfig = field(default_factory=OpenRouterBroadcastConfig)
     redaction_keys: frozenset[str] = frozenset(SENSITIVE_ATTR_KEYS)
     redaction_key_parts: tuple[str, ...] = SENSITIVE_ATTR_PARTS
 
@@ -364,6 +406,7 @@ def load_config(path: Path | None) -> AppConfig:
     storage_data = table_config(data, "storage")
     collector_data = merged_table_config(data, "server", "collector")
     aggregation_data = merged_table_config(data, "central_server", "aggregation_server")
+    openrouter_data = table_config(data, "openrouter_broadcast")
     redaction_data = table_config(data, "redaction")
 
     extracted_attributes = storage_data.get("extracted_attributes", "redacted")
@@ -392,11 +435,19 @@ def load_config(path: Path | None) -> AppConfig:
         port=int_config(aggregation_data, "port", 8318),
         db=str_config(aggregation_data, "db", str(DEFAULT_SERVER_DB)),
     )
+    openrouter_broadcast = OpenRouterBroadcastConfig(
+        enabled=bool_config(openrouter_data, "enabled", False),
+        api_key=optional_str_config(openrouter_data, "api_key"),
+        required_header_name=optional_str_config(openrouter_data, "required_header_name"),
+        required_header_value=optional_str_config(openrouter_data, "required_header_value"),
+        retain_payload_body=bool_config(openrouter_data, "retain_payload_body", True),
+    )
     return AppConfig(
         client_name=str_config(data, "client_name", "local"),
         storage=storage,
         server=remote_server,
         central=central,
+        openrouter_broadcast=openrouter_broadcast,
         redaction_keys=frozenset(key.lower() for key in list_config(redaction_data, "keys", SENSITIVE_ATTR_KEYS)),
         redaction_key_parts=tuple(
             part.lower() for part in list_config(redaction_data, "key_parts", SENSITIVE_ATTR_PARTS)
@@ -479,7 +530,30 @@ def table_columns(con: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in con.execute(f"pragma table_info({table})")}
 
 
+def add_column_if_missing(con: sqlite3.Connection, table: str, columns: set[str], definition: str) -> None:
+    name = definition.split()[0]
+    if name not in columns:
+        con.execute(f"alter table {table} add column {definition}")
+        columns.add(name)
+
+
+def ensure_usage_metadata_schema(con: sqlite3.Connection) -> None:
+    columns = table_columns(con, "usage_events")
+    for definition in (
+        "source_kind text",
+        "trace_id text",
+        "span_id text",
+        "workspace_label text",
+        "api_key_label text",
+        "provider_name text",
+        "cost_value real default 0",
+        "cost_unit text",
+    ):
+        add_column_if_missing(con, "usage_events", columns, definition)
+
+
 def ensure_client_sync_schema(con: sqlite3.Connection) -> None:
+    ensure_usage_metadata_schema(con)
     columns = table_columns(con, "usage_events")
     if "client_event_id" not in columns:
         con.execute("alter table usage_events add column client_event_id text")
@@ -557,8 +631,31 @@ def connect_server(db_path: Path) -> sqlite3.Connection:
             total_tokens integer default 0,
             cached_tokens integer default 0,
             reasoning_tokens integer default 0,
+            source_kind text,
+            trace_id text,
+            span_id text,
+            workspace_label text,
+            api_key_label text,
+            provider_name text,
+            cost_value real default 0,
+            cost_unit text,
             attributes_json text not null,
             unique(client_name, client_event_id)
+        )
+        """
+    )
+    ensure_usage_metadata_schema(con)
+    con.execute(
+        """
+        create table if not exists broadcast_payloads (
+            id integer primary key autoincrement,
+            received_at text not null,
+            path text not null,
+            content_type text,
+            body blob not null,
+            replay_status text not null default 'received',
+            replayed_at text,
+            last_error text
         )
         """
     )
@@ -590,6 +687,12 @@ def connect_server(db_path: Path) -> sqlite3.Connection:
     con.execute("create index if not exists idx_server_usage_received_at on usage_events(source_received_at)")
     con.execute("create index if not exists idx_server_usage_client on usage_events(client_name)")
     con.execute("create index if not exists idx_server_usage_model on usage_events(model)")
+    con.execute("create index if not exists idx_server_usage_source_kind on usage_events(source_kind)")
+    con.execute("create index if not exists idx_server_usage_workspace on usage_events(workspace_label)")
+    con.execute("create index if not exists idx_server_usage_api_key on usage_events(api_key_label)")
+    con.execute("create index if not exists idx_server_usage_provider on usage_events(provider_name)")
+    con.execute("create index if not exists idx_broadcast_payloads_received_at on broadcast_payloads(received_at)")
+    con.execute("create index if not exists idx_broadcast_payloads_replay_status on broadcast_payloads(replay_status)")
     con.execute("create index if not exists idx_server_tool_received_at on tool_events(source_received_at)")
     con.execute("create index if not exists idx_server_tool_client on tool_events(client_name)")
     con.execute("create index if not exists idx_server_tool_tool_name on tool_events(tool_name)")
@@ -599,6 +702,20 @@ def connect_server(db_path: Path) -> sqlite3.Connection:
 
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def unix_nano_to_iso(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    try:
+        nanos = int(value)
+    except (TypeError, ValueError):
+        return None
+    seconds, remainder = divmod(nanos, 1_000_000_000)
+    timestamp = dt.datetime.fromtimestamp(seconds, dt.timezone.utc)
+    if remainder:
+        timestamp = timestamp.replace(microsecond=remainder // 1000)
+    return timestamp.isoformat(timespec="microseconds" if timestamp.microsecond else "seconds")
 
 
 def otel_value(value: Any) -> Any:
@@ -669,6 +786,18 @@ def optional_int_attr(attrs: dict[str, Any], aliases: tuple[str, ...]) -> int | 
         except (TypeError, ValueError):
             continue
     return None
+
+
+def float_attr(attrs: dict[str, Any], aliases: tuple[str, ...]) -> tuple[float, str | None]:
+    for alias in aliases:
+        value = attrs.get(alias)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value), alias
+        except (TypeError, ValueError):
+            continue
+    return 0.0, None
 
 
 def first_attr(attrs: dict[str, Any], aliases: tuple[str, ...]) -> str | None:
@@ -751,6 +880,28 @@ def usage_from_attrs(
     total_tokens = int_attr(attrs, TOKEN_KEYS["total"])
     cached_tokens = int_attr(attrs, TOKEN_KEYS["cached"])
     reasoning_tokens = int_attr(attrs, TOKEN_KEYS["reasoning"])
+    cost_value, cost_alias = float_attr(
+        attrs,
+        (
+            "gen_ai.usage.cost_usd",
+            "usage.cost_usd",
+            "cost",
+            "usage.cost",
+            "gen_ai.usage.total_cost",
+            "gen_ai.usage.cost",
+            "openrouter.cost",
+            "openrouter.credits",
+        ),
+    )
+    cost_unit = first_attr(
+        attrs,
+        ("cost_unit", "cost.currency", "gen_ai.usage.cost_unit", "gen_ai.usage.cost_currency", "openrouter.cost_unit"),
+    )
+    if cost_value and not cost_unit:
+        if cost_alias in ("gen_ai.usage.cost_usd", "usage.cost_usd"):
+            cost_unit = "USD"
+        else:
+            cost_unit = "credits"
     if not any((input_tokens, output_tokens, total_tokens, cached_tokens, reasoning_tokens)):
         if not has_token_signal(attrs):
             return None
@@ -775,6 +926,50 @@ def usage_from_attrs(
         "total_tokens": total_tokens,
         "cached_tokens": cached_tokens,
         "reasoning_tokens": reasoning_tokens,
+        "source_kind": first_attr(attrs, ("source_kind", "source.kind", "service.name")),
+        "trace_id": first_attr(attrs, ("trace_id", "traceId")),
+        "span_id": first_attr(attrs, ("span_id", "spanId")),
+        "workspace_label": first_attr(
+            attrs,
+            (
+                "workspace_label",
+                "workspace.id",
+                "workspace.name",
+                "openrouter.workspace",
+                "openrouter.workspace_id",
+                "trace.metadata.openrouter.entity_id",
+                "trace.metadata.workspace",
+                "trace.metadata.workspace_id",
+                "trace.metadata.workspace_name",
+            ),
+        ),
+        "api_key_label": first_attr(
+            attrs,
+            (
+                "api_key_label",
+                "openrouter.api_key_id",
+                "openrouter.api_key_label",
+                "trace.metadata.openrouter.api_key_name",
+                "trace.metadata.api_key_label",
+                "trace.metadata.api_key_id",
+            ),
+        ),
+        "provider_name": first_attr(
+            attrs,
+            (
+                "provider_name",
+                "trace.metadata.openrouter.provider_name",
+                "trace.metadata.openrouter.provider_slug",
+                "gen_ai.provider.name",
+                "openrouter.provider_name",
+                "provider",
+                "gen_ai.system",
+                "gen_ai.response.provider",
+                "openrouter.provider",
+            ),
+        ),
+        "cost_value": cost_value,
+        "cost_unit": cost_unit,
         "attributes_json": stored_attributes_json(attrs, config),
     }
 
@@ -834,7 +1029,17 @@ def iter_spans(payload: dict[str, Any]) -> Iterable[tuple[str | None, dict[str, 
         for scope in resource.get("scopeSpans", []):
             scope_attrs = attrs_to_dict(scope.get("scope", {}).get("attributes"))
             for span in scope.get("spans", []):
-                attrs = merge_attrs(resource_attrs, scope_attrs, attrs_to_dict(span.get("attributes")))
+                attrs = merge_attrs(
+                    resource_attrs,
+                    scope_attrs,
+                    attrs_to_dict(span.get("attributes")),
+                    {
+                        "traceId": span.get("traceId"),
+                        "spanId": span.get("spanId"),
+                        "startTimeUnixNano": span.get("startTimeUnixNano"),
+                        "endTimeUnixNano": span.get("endTimeUnixNano"),
+                    },
+                )
                 yield span.get("name"), attrs
 
 
@@ -909,10 +1114,11 @@ def insert_usage(con: sqlite3.Connection, raw_id: int, received_at: str, events:
             """
             insert into usage_events(
                 raw_payload_id, received_at, signal, event_name, model, session_id, thread_id,
-                input_tokens, output_tokens, total_tokens, cached_tokens, reasoning_tokens, attributes_json,
-                client_event_id
+                input_tokens, output_tokens, total_tokens, cached_tokens, reasoning_tokens,
+                source_kind, trace_id, span_id, workspace_label, api_key_label, provider_name,
+                cost_value, cost_unit, attributes_json, client_event_id
             )
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 raw_id,
@@ -927,6 +1133,14 @@ def insert_usage(con: sqlite3.Connection, raw_id: int, received_at: str, events:
                 event["total_tokens"],
                 event["cached_tokens"],
                 event["reasoning_tokens"],
+                event.get("source_kind"),
+                event.get("trace_id"),
+                event.get("span_id"),
+                event.get("workspace_label"),
+                event.get("api_key_label"),
+                event.get("provider_name"),
+                float(event.get("cost_value") or 0),
+                event.get("cost_unit"),
                 event["attributes_json"],
                 client_event_id,
             ),
@@ -970,12 +1184,14 @@ def parse_datetime_filter(value: str | None, *, end_of_day: bool = False) -> str
     if not value:
         return None
     if len(value) == 10:
-        suffix = "23:59:59" if end_of_day else "00:00:00"
-        return dt.datetime.fromisoformat(f"{value}T{suffix}+00:00").isoformat(timespec="seconds")
+        if end_of_day:
+            return dt.datetime.fromisoformat(f"{value}T23:59:59.999999+00:00").isoformat(timespec="microseconds")
+        return dt.datetime.fromisoformat(f"{value}T00:00:00+00:00").isoformat(timespec="seconds")
     parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
-    return parsed.astimezone(dt.timezone.utc).isoformat(timespec="seconds")
+    parsed = parsed.astimezone(dt.timezone.utc)
+    return parsed.isoformat(timespec="microseconds" if parsed.microsecond else "seconds")
 
 
 def where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
@@ -1185,6 +1401,9 @@ def serve_payload_log_line(
 def format_cell(column: str, value: Any) -> str:
     if value in (None, ""):
         return ""
+    if column in COST_COLUMNS:
+        amount = float(value)
+        return f"{amount:.6f}".rstrip("0").rstrip(".") if amount else "0"
     if column in NUMERIC_COLUMNS:
         return f"{int(value):,}"
     if column in TIME_COLUMNS:
@@ -1293,6 +1512,25 @@ def tool_default_columns(group_by: str) -> tuple[str, ...]:
 
 
 def server_default_columns(group_by: str) -> tuple[str, ...]:
+    source_columns = {
+        "source": "source_kind",
+        "workspace": "workspace_label",
+        "api-key": "api_key_label",
+        "provider": "provider_name",
+    }
+    if group_by in source_columns:
+        return (
+            source_columns[group_by],
+            "events",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_tokens",
+            "reasoning_tokens",
+            "cost_value",
+            "cost_unit",
+            "last_seen",
+        )
     if group_by == "client":
         return (
             "client_name",
@@ -1302,6 +1540,8 @@ def server_default_columns(group_by: str) -> tuple[str, ...]:
             "total_tokens",
             "cached_tokens",
             "reasoning_tokens",
+            "cost_value",
+            "cost_unit",
             "last_seen",
         )
     if group_by == "client-model":
@@ -1314,6 +1554,8 @@ def server_default_columns(group_by: str) -> tuple[str, ...]:
             "total_tokens",
             "cached_tokens",
             "reasoning_tokens",
+            "cost_value",
+            "cost_unit",
             "last_seen",
         )
     if group_by == "day-client":
@@ -1326,6 +1568,8 @@ def server_default_columns(group_by: str) -> tuple[str, ...]:
             "total_tokens",
             "cached_tokens",
             "reasoning_tokens",
+            "cost_value",
+            "cost_unit",
         )
     if group_by == "day-model-client":
         return (
@@ -1338,6 +1582,8 @@ def server_default_columns(group_by: str) -> tuple[str, ...]:
             "total_tokens",
             "cached_tokens",
             "reasoning_tokens",
+            "cost_value",
+            "cost_unit",
         )
     return default_columns(group_by)
 
@@ -1378,9 +1624,14 @@ def print_compact_rows(rows: Sequence[sqlite3.Row], columns: Sequence[str]) -> N
                 "tool_name",
                 "session_id",
                 "event_name",
+                "source_kind",
+                "workspace_label",
+                "api_key_label",
+                "provider_name",
                 "events",
                 "tool_events",
                 "total_tokens",
+                "cost_value",
                 "last_seen",
             ):
                 first_line.append(entry)
@@ -1415,7 +1666,7 @@ def print_table(rows: Sequence[sqlite3.Row], columns: Sequence[str] = REPORT_COL
         cells = []
         for column in columns:
             cell = row[column]
-            if column in NUMERIC_COLUMNS:
+            if column in NUMERIC_COLUMNS or column in COST_COLUMNS:
                 cells.append(cell.rjust(widths[column]))
             else:
                 cells.append(cell.ljust(widths[column]))
@@ -1627,6 +1878,10 @@ class ServerReceiver(BaseHTTPRequestHandler):
         "day-client",
         "day-session",
         "day-model-client",
+        "source",
+        "workspace",
+        "api-key",
+        "provider",
     )
     TOOL_REPORT_GROUPS = (
         "total",
@@ -1695,6 +1950,10 @@ class ServerReceiver(BaseHTTPRequestHandler):
             model=query.get("model", [None])[0] or None,
             session_id=query.get("session_id", [None])[0] or None,
             client_name=query.get("client_name", [None])[0] or None,
+            source_kind=query.get("source_kind", [None])[0] or None,
+            workspace_label=query.get("workspace_label", [None])[0] or None,
+            api_key_label=query.get("api_key_label", [None])[0] or None,
+            provider_name=query.get("provider_name", [None])[0] or None,
             limit=limit,
         )
 
@@ -1733,7 +1992,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
         for row in rows:
             cells = []
             for column in columns:
-                classes = "num" if column in NUMERIC_COLUMNS else ""
+                classes = "num" if column in NUMERIC_COLUMNS or column in COST_COLUMNS else ""
                 cells.append(server_html_cell(column, row[column], classes=classes))
             table_rows.append(f"<tr>{''.join(cells)}</tr>")
         headers = "".join(f"<th>{html.escape(DISPLAY_NAMES.get(column, column))}</th>" for column in columns)
@@ -1744,6 +2003,13 @@ class ServerReceiver(BaseHTTPRequestHandler):
             return html.escape(str(value or ""))
 
         nav = server_nav("usage")
+        quick_links = """
+      <div class="quick-links">
+        <a href="/reports?group_by=workspace&source_kind=openrouter_broadcast">OpenRouter by workspace</a>
+        <a href="/reports?group_by=api-key&source_kind=openrouter_broadcast">OpenRouter by API key</a>
+        <a href="/reports?group_by=provider&source_kind=openrouter_broadcast">OpenRouter by provider</a>
+      </div>
+        """
         styles = server_page_styles()
         theme_script = server_theme_script()
         favicon = server_favicon_link()
@@ -1758,23 +2024,31 @@ class ServerReceiver(BaseHTTPRequestHandler):
 </head>
 <body>
   {nav}
-  <main>
-    <h1>Usage Reports</h1>
+	  <main>
+	    <header>
+	      <h1>Usage Reports</h1>
+	      {quick_links}
+	    </header>
     <section class="summary">
       <div><div class="label">Events</div><div class="value">{format_cell("events", stats["usage_events"])}</div></div>
       <div><div class="label">Total tokens</div><div class="value">{format_cell("total_tokens", stats["total_tokens"])}</div></div>
-      <div><div class="label">Input</div><div class="value">{format_cell("input_tokens", stats["input_tokens"])}</div></div>
-      <div><div class="label">Output</div><div class="value">{format_cell("output_tokens", stats["output_tokens"])}</div></div>
-      <div><div class="label">Tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
+	      <div><div class="label">Input</div><div class="value">{format_cell("input_tokens", stats["input_tokens"])}</div></div>
+	      <div><div class="label">Output</div><div class="value">{format_cell("output_tokens", stats["output_tokens"])}</div></div>
+	      <div><div class="label">Cost</div><div class="value">{format_cell("cost_value", stats["cost_value"])} {html.escape(str(stats.get("cost_unit") or ""))}</div></div>
+	      <div><div class="label">Tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
       <div><div class="label">Clients</div><div class="value">{format_cell("events", stats["configured_clients"])}</div></div>
     </section>
     <form method="get" action="/reports" class="filters">
       <label>Group by <select name="group_by">{group_options}</select></label>
       <label>Since <input name="since" value="{field("since")}" placeholder="YYYY-MM-DD"></label>
       <label>Until <input name="until" value="{field("until")}" placeholder="YYYY-MM-DD"></label>
-      <label>Client <input name="client_name" value="{field("client_name")}"></label>
-      <label>Model <input name="model" value="{field("model")}"></label>
-      <label>Session <input name="session_id" value="{field("session_id")}"></label>
+	      <label>Client <input name="client_name" value="{field("client_name")}"></label>
+	      <label>Model <input name="model" value="{field("model")}"></label>
+	      <label>Session <input name="session_id" value="{field("session_id")}"></label>
+	      <label>Source <input name="source_kind" value="{field("source_kind")}"></label>
+	      <label>Workspace <input name="workspace_label" value="{field("workspace_label")}"></label>
+	      <label>API key <input name="api_key_label" value="{field("api_key_label")}"></label>
+	      <label>Provider <input name="provider_name" value="{field("provider_name")}"></label>
       <label>Limit <input name="limit" type="number" min="1" max="1000" value="{args.limit}"></label>
       <button type="submit">Apply</button>
     </form>
@@ -2051,9 +2325,50 @@ class ServerReceiver(BaseHTTPRequestHandler):
         parsed = parse.urlparse(self.path)
         con = connect_server(self.db_path)
         try:
+            if parsed.path == "/v1/traces":
+                if not require_openrouter_broadcast(self.app_config, self.headers):
+                    self.send_json(401, {"error": "invalid OpenRouter Broadcast token"})
+                    return
+                try:
+                    ensure_no_openrouter_client_conflict(con)
+                except ValueError as exc:
+                    self.send_json(409, {"error": str(exc)})
+                    return
+                length = int(self.headers.get("content-length", "0"))
+                if length > self.app_config.storage.max_body_bytes:
+                    self.send_json(413, {"error": "payload too large"})
+                    return
+                body = self.rfile.read(length)
+                content_type = self.headers.get("content-type")
+                if not body or body.strip() in (b"{}", b'{"resourceSpans":[]}'):
+                    payload_id = insert_broadcast_payload(con, parsed.path, content_type, body, self.app_config, status="ingested")
+                    con.commit()
+                    self.send_json(200, {"accepted": 0, "duplicates": 0, "payload_id": payload_id})
+                    return
+                payload_id = insert_broadcast_payload(con, parsed.path, content_type, body, self.app_config)
+                try:
+                    accepted, duplicates = ingest_openrouter_broadcast(con, body, self.app_config)
+                    con.execute(
+                        "update broadcast_payloads set replay_status = ?, replayed_at = ?, last_error = null where id = ?",
+                        ("ingested", now_iso(), payload_id),
+                    )
+                    con.commit()
+                except Exception as exc:
+                    con.execute(
+                        "update broadcast_payloads set replay_status = ?, replayed_at = ?, last_error = ? where id = ?",
+                        ("error", now_iso(), str(exc), payload_id),
+                    )
+                    con.commit()
+                    self.send_json(400, {"error": "invalid OpenRouter Broadcast payload", "payload_id": payload_id})
+                    return
+                self.send_json(200, {"accepted": accepted, "duplicates": duplicates, "payload_id": payload_id})
+                return
             if parsed.path == "/api/v1/usage-events":
                 payload = self.read_json()
                 client_name = str(payload.get("client_name") or "")
+                if client_name == OPENROUTER_BROADCAST_CLIENT:
+                    self.send_json(400, {"error": f"{OPENROUTER_BROADCAST_CLIENT} is reserved"})
+                    return
                 if not authenticate_client(con, client_name, bearer_token(self.headers)):
                     self.send_json(401, {"error": "invalid client token"})
                     return
@@ -2088,6 +2403,9 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 try:
                     token = create_client_token(con, client_name, display_name)
                     con.commit()
+                except ValueError as exc:
+                    self.send_html(400, self.render_admin(con, message=str(exc)))
+                    return
                 except sqlite3.IntegrityError:
                     self.send_html(409, self.render_admin(con, message=f"Client {client_name} already exists."))
                     return
@@ -2095,8 +2413,12 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/admin/clients/rename":
                 form = self.read_form()
-                rename_client(con, form.get("client_name", ""), form.get("display_name", "").strip())
-                con.commit()
+                try:
+                    rename_client(con, form.get("client_name", ""), form.get("display_name", "").strip())
+                    con.commit()
+                except ValueError as exc:
+                    self.send_html(400, self.render_admin(con, message=str(exc)))
+                    return
                 self.redirect("/admin?message=Client%20renamed")
                 return
             if parsed.path == "/admin/clients/revoke":
@@ -2166,7 +2488,12 @@ def server_serve(args: argparse.Namespace) -> None:
         raise SystemExit(2)
     ServerReceiver.db_path = db_path
     ServerReceiver.app_config = config
-    connect_server(db_path).close()
+    con = connect_server(db_path)
+    try:
+        if config.openrouter_broadcast.enabled:
+            ensure_no_openrouter_client_conflict(con)
+    finally:
+        con.close()
     server = ThreadingHTTPServer((host, port), ServerReceiver)
     print(f"Server listening on http://{host}:{port}; db={db_path}", flush=True)
     try:
@@ -2325,6 +2652,14 @@ def event_from_stored_row(row: sqlite3.Row, config: AppConfig) -> dict[str, Any]
         "total_tokens": row["total_tokens"],
         "cached_tokens": row["cached_tokens"],
         "reasoning_tokens": row["reasoning_tokens"],
+        "source_kind": row["source_kind"],
+        "trace_id": row["trace_id"],
+        "span_id": row["span_id"],
+        "workspace_label": row["workspace_label"],
+        "api_key_label": row["api_key_label"],
+        "provider_name": row["provider_name"],
+        "cost_value": row["cost_value"],
+        "cost_unit": row["cost_unit"],
         "attributes_json": stored_attributes_json(attrs, config),
     }
 
@@ -2409,6 +2744,14 @@ def usage_event_to_payload(row: sqlite3.Row) -> dict[str, Any]:
         "total_tokens": row["total_tokens"],
         "cached_tokens": row["cached_tokens"],
         "reasoning_tokens": row["reasoning_tokens"],
+        "source_kind": row["source_kind"],
+        "trace_id": row["trace_id"],
+        "span_id": row["span_id"],
+        "workspace_label": row["workspace_label"],
+        "api_key_label": row["api_key_label"],
+        "provider_name": row["provider_name"],
+        "cost_value": row["cost_value"],
+        "cost_unit": row["cost_unit"],
         "attributes_json": row["attributes_json"],
     }
 
@@ -2695,7 +3038,35 @@ def generate_token() -> str:
     return "ait_" + secrets.token_urlsafe(32)
 
 
+def validate_client_name(client_name: str) -> None:
+    if client_name == OPENROUTER_BROADCAST_CLIENT:
+        raise ValueError(f"{OPENROUTER_BROADCAST_CLIENT} is reserved for OpenRouter Broadcast ingestion")
+
+
+def ensure_no_openrouter_client_conflict(con: sqlite3.Connection) -> None:
+    row = con.execute("select 1 from clients where client_name = ?", (OPENROUTER_BROADCAST_CLIENT,)).fetchone()
+    if row:
+        raise ValueError(
+            f"Existing collector client {OPENROUTER_BROADCAST_CLIENT} conflicts with OpenRouter Broadcast ingestion"
+        )
+    row = con.execute(
+        """
+        select 1
+        from usage_events
+        where client_name = ?
+          and coalesce(source_kind, '') != ?
+        limit 1
+        """,
+        (OPENROUTER_BROADCAST_CLIENT, OPENROUTER_SOURCE_KIND),
+    ).fetchone()
+    if row:
+        raise ValueError(
+            f"Existing usage rows for {OPENROUTER_BROADCAST_CLIENT} conflict with OpenRouter Broadcast ingestion"
+        )
+
+
 def create_client_token(con: sqlite3.Connection, client_name: str, display_name: str) -> str:
+    validate_client_name(client_name)
     token = generate_token()
     now = now_iso()
     con.execute(
@@ -2709,6 +3080,7 @@ def create_client_token(con: sqlite3.Connection, client_name: str, display_name:
 
 
 def rename_client(con: sqlite3.Connection, client_name: str, display_name: str) -> None:
+    validate_client_name(client_name)
     con.execute(
         "update clients set display_name = ?, updated_at = ? where client_name = ?",
         (display_name, now_iso(), client_name),
@@ -2756,6 +3128,137 @@ def require_admin(config: AppConfig, headers: Any) -> bool:
     return secrets.compare_digest(bearer_token(headers) or "", config.central.admin_api_key)
 
 
+def require_openrouter_broadcast(config: AppConfig, headers: Any) -> bool:
+    broadcast = config.openrouter_broadcast
+    if not broadcast.enabled or not broadcast.api_key:
+        return False
+    if not secrets.compare_digest(bearer_token(headers) or "", broadcast.api_key):
+        return False
+    if broadcast.required_header_name:
+        if broadcast.required_header_value is None:
+            return False
+        value = headers.get(broadcast.required_header_name)
+        if not secrets.compare_digest(value or "", broadcast.required_header_value):
+            return False
+    return True
+
+
+def insert_broadcast_payload(
+    con: sqlite3.Connection,
+    path: str,
+    content_type: str | None,
+    body: bytes,
+    config: AppConfig,
+    *,
+    status: str = "received",
+    last_error: str | None = None,
+) -> int:
+    stored_body = body if config.openrouter_broadcast.retain_payload_body else b""
+    cur = con.execute(
+        """
+        insert into broadcast_payloads(received_at, path, content_type, body, replay_status, last_error)
+        values (?, ?, ?, ?, ?, ?)
+        """,
+        (now_iso(), path, content_type, stored_body, status, last_error),
+    )
+    return int(cur.lastrowid)
+
+
+def normalize_openrouter_broadcast(body: bytes, config: AppConfig) -> list[dict[str, Any]]:
+    payload = json.loads(body.decode("utf-8"))
+    events: list[dict[str, Any]] = []
+    for name, attrs in iter_spans(payload):
+        event = usage_from_attrs("traces", name, attrs, config)
+        if not event:
+            continue
+        trace_id = event.get("trace_id")
+        span_id = event.get("span_id")
+        if not trace_id or not span_id:
+            continue
+        event["source_kind"] = OPENROUTER_SOURCE_KIND
+        event["client_event_id"] = f"orb:{trace_id}:{span_id}"
+        event["received_at"] = unix_nano_to_iso(attrs.get("startTimeUnixNano")) or unix_nano_to_iso(
+            attrs.get("endTimeUnixNano")
+        )
+        events.append(event)
+    return events
+
+
+def ingest_openrouter_broadcast(
+    con: sqlite3.Connection,
+    body: bytes,
+    config: AppConfig,
+) -> tuple[int, int]:
+    return ingest_usage_events(con, OPENROUTER_BROADCAST_CLIENT, normalize_openrouter_broadcast(body, config))
+
+
+def replay_broadcast_payloads(
+    con: sqlite3.Connection,
+    config: AppConfig,
+    *,
+    payload_id: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    replay_status: str | None = None,
+    limit: int | None = None,
+) -> dict[str, int]:
+    ensure_no_openrouter_client_conflict(con)
+    clauses: list[str] = []
+    params: list[Any] = []
+    since = parse_datetime_filter(since)
+    until = parse_datetime_filter(until, end_of_day=True)
+    if payload_id is not None:
+        clauses.append("id = ?")
+        params.append(payload_id)
+    if since:
+        clauses.append("received_at >= ?")
+        params.append(since)
+    if until:
+        clauses.append("received_at <= ?")
+        params.append(until)
+    if replay_status:
+        clauses.append("replay_status = ?")
+        params.append(replay_status)
+    where = "where " + " and ".join(clauses) if clauses else ""
+    query = f"""
+        select id, body
+        from broadcast_payloads
+        {where}
+        order by id
+        {f"limit {int(limit)}" if limit else ""}
+    """
+    rows = con.execute(query, params).fetchall()
+    payloads = 0
+    accepted = 0
+    duplicates = 0
+    errors = 0
+    for row in rows:
+        payloads += 1
+        body = bytes(row["body"])
+        if not body:
+            errors += 1
+            con.execute(
+                "update broadcast_payloads set replay_status = ?, replayed_at = ?, last_error = ? where id = ?",
+                ("error", now_iso(), "retained payload body is empty", row["id"]),
+            )
+            continue
+        try:
+            row_accepted, row_duplicates = ingest_openrouter_broadcast(con, body, config)
+            accepted += row_accepted
+            duplicates += row_duplicates
+            con.execute(
+                "update broadcast_payloads set replay_status = ?, replayed_at = ?, last_error = null where id = ?",
+                ("replayed", now_iso(), row["id"]),
+            )
+        except Exception as exc:
+            errors += 1
+            con.execute(
+                "update broadcast_payloads set replay_status = ?, replayed_at = ?, last_error = ? where id = ?",
+                ("error", now_iso(), str(exc), row["id"]),
+            )
+    return {"payloads": payloads, "accepted": accepted, "duplicates": duplicates, "errors": errors}
+
+
 def ingest_usage_events(con: sqlite3.Connection, client_name: str, events: Sequence[dict[str, Any]]) -> tuple[int, int]:
     accepted = 0
     duplicates = 0
@@ -2767,9 +3270,10 @@ def ingest_usage_events(con: sqlite3.Connection, client_name: str, events: Seque
                 insert into usage_events(
                     client_name, client_event_id, received_at, source_received_at, signal, event_name,
                     model, session_id, thread_id, input_tokens, output_tokens, total_tokens,
-                    cached_tokens, reasoning_tokens, attributes_json
+                    cached_tokens, reasoning_tokens, source_kind, trace_id, span_id, workspace_label,
+                    api_key_label, provider_name, cost_value, cost_unit, attributes_json
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     client_name,
@@ -2786,6 +3290,14 @@ def ingest_usage_events(con: sqlite3.Connection, client_name: str, events: Seque
                     int(event.get("total_tokens") or 0),
                     int(event.get("cached_tokens") or 0),
                     int(event.get("reasoning_tokens") or 0),
+                    event.get("source_kind"),
+                    event.get("trace_id"),
+                    event.get("span_id"),
+                    event.get("workspace_label"),
+                    event.get("api_key_label"),
+                    event.get("provider_name"),
+                    float(event.get("cost_value") or 0),
+                    event.get("cost_unit"),
                     str(event.get("attributes_json") or "{}"),
                 ),
             )
@@ -2859,6 +3371,18 @@ def server_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
     if getattr(args, "client_name", None):
         clauses.append("usage_events.client_name = ?")
         params.append(args.client_name)
+    if getattr(args, "source_kind", None):
+        clauses.append("usage_events.source_kind = ?")
+        params.append(args.source_kind)
+    if getattr(args, "workspace_label", None):
+        clauses.append("usage_events.workspace_label = ?")
+        params.append(args.workspace_label)
+    if getattr(args, "api_key_label", None):
+        clauses.append("usage_events.api_key_label = ?")
+        params.append(args.api_key_label)
+    if getattr(args, "provider_name", None):
+        clauses.append("usage_events.provider_name = ?")
+        params.append(args.provider_name)
     return ("where " + " and ".join(clauses), params) if clauses else ("", params)
 
 
@@ -2888,11 +3412,16 @@ def server_tool_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
     return ("where " + " and ".join(clauses), params) if clauses else ("", params)
 
 
-def server_group_expressions(group_by: str) -> tuple[str, str, str, str]:
+def server_group_expressions(group_by: str) -> tuple[str, str, str, str, str, str, str, str, str]:
     period_expr = "''"
     client_expr = "''"
     model_expr = "''"
     session_expr = "''"
+    source_expr = "''"
+    workspace_expr = "''"
+    api_key_expr = "''"
+    provider_expr = "''"
+    cost_unit_expr = "coalesce(cost_unit, '')"
     if group_by in ("day", "day-model", "day-session", "day-client", "day-model-client"):
         period_expr = "substr(usage_events.source_received_at, 1, 10)"
     if group_by in ("client", "client-model", "day-client", "day-model-client"):
@@ -2901,7 +3430,15 @@ def server_group_expressions(group_by: str) -> tuple[str, str, str, str]:
         model_expr = "coalesce(model, '(unknown)')"
     if group_by in ("session", "day-session"):
         session_expr = "coalesce(session_id, '(unknown)')"
-    return period_expr, client_expr, model_expr, session_expr
+    if group_by == "source":
+        source_expr = "coalesce(source_kind, '(unknown)')"
+    if group_by == "workspace":
+        workspace_expr = "coalesce(workspace_label, '(unknown)')"
+    if group_by == "api-key":
+        api_key_expr = "coalesce(api_key_label, '(unknown)')"
+    if group_by == "provider":
+        provider_expr = "coalesce(provider_name, '(unknown)')"
+    return period_expr, client_expr, model_expr, session_expr, source_expr, workspace_expr, api_key_expr, provider_expr, cost_unit_expr
 
 
 def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, str]:
@@ -2924,12 +3461,40 @@ def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, st
 
 
 def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
-    period_expr, client_expr, model_expr, session_expr = server_group_expressions(args.group_by)
+    (
+        period_expr,
+        client_expr,
+        model_expr,
+        session_expr,
+        source_expr,
+        workspace_expr,
+        api_key_expr,
+        provider_expr,
+        cost_unit_expr,
+    ) = server_group_expressions(args.group_by)
+    cost_unit_grouped = args.group_by in COST_UNIT_REPORT_GROUPS
+    cost_value_select = "coalesce(sum(usage_events.cost_value), 0)"
+    cost_unit_select = cost_unit_expr
+    cost_group = "9"
+    if not cost_unit_grouped:
+        cost_value_select = """
+            case
+              when count(distinct coalesce(usage_events.cost_unit, '')) <= 1 then coalesce(sum(usage_events.cost_value), 0)
+              else null
+            end
+        """
+        cost_unit_select = """
+            case
+              when count(distinct coalesce(usage_events.cost_unit, '')) <= 1 then max(usage_events.cost_unit)
+              else 'mixed'
+            end
+        """
+        cost_group = "''"
     where, params = server_where_clause(args)
     order_by = "last_seen desc"
     if args.group_by.startswith("day"):
         order_by = "period desc, total_tokens desc"
-    elif args.group_by in ("model", "session", "client", "client-model"):
+    elif args.group_by in ("model", "session", "client", "client-model", "source", "workspace", "api-key", "provider"):
         order_by = "total_tokens desc"
     query = f"""
         select
@@ -2937,18 +3502,24 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
             {client_expr} as client_name,
             {model_expr} as model,
             {session_expr} as session_id,
+            {source_expr} as source_kind,
+            {workspace_expr} as workspace_label,
+            {api_key_expr} as api_key_label,
+            {provider_expr} as provider_name,
+            {cost_unit_select} as cost_unit,
             count(*) as events,
             coalesce(sum(usage_events.input_tokens), 0) as input_tokens,
             coalesce(sum(usage_events.output_tokens), 0) as output_tokens,
             coalesce(sum(usage_events.total_tokens), 0) as total_tokens,
             coalesce(sum(usage_events.cached_tokens), 0) as cached_tokens,
             coalesce(sum(usage_events.reasoning_tokens), 0) as reasoning_tokens,
+            {cost_value_select} as cost_value,
             min(usage_events.source_received_at) as first_seen,
             max(usage_events.source_received_at) as last_seen
         from usage_events
         left join clients on clients.client_name = usage_events.client_name
         {where}
-        group by 1, 2, 3, 4
+        group by 1, 2, 3, 4, 5, 6, 7, 8, {cost_group}
         order by {order_by}
         limit ?
     """
@@ -3040,6 +3611,14 @@ def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
             coalesce(sum(total_tokens), 0) as total_tokens,
             coalesce(sum(cached_tokens), 0) as cached_tokens,
             coalesce(sum(reasoning_tokens), 0) as reasoning_tokens,
+            case
+              when count(distinct coalesce(cost_unit, '')) <= 1 then coalesce(sum(cost_value), 0)
+              else null
+            end as cost_value,
+            case
+              when count(distinct coalesce(cost_unit, '')) <= 1 then max(cost_unit)
+              else 'mixed'
+            end as cost_unit,
             min(source_received_at) as first_seen,
             max(source_received_at) as last_seen
         from usage_events
@@ -3063,6 +3642,28 @@ def reindex(args: argparse.Namespace) -> None:
             f"Reindexed {raw_count} raw payloads; inserted {inserted} usage events "
             f"and {inserted_tool_events} tool events."
         )
+    finally:
+        con.close()
+
+
+def replay_broadcast(args: argparse.Namespace) -> None:
+    config = load_config(Path(args.config))
+    con = connect_server(Path(args.server_db or config.central.db))
+    try:
+        result = replay_broadcast_payloads(
+            con,
+            config,
+            payload_id=args.payload_id,
+            since=args.since,
+            until=args.until,
+            replay_status=args.replay_status,
+            limit=args.limit,
+        )
+        con.commit()
+        if args.format == "json":
+            print(json.dumps(result, indent=2))
+        else:
+            print_table([result], ("payloads", "accepted", "duplicates", "errors"))
     finally:
         con.close()
 
@@ -3261,6 +3862,16 @@ def main() -> int:
     p_server_serve.add_argument("--server-db")
     p_server_serve.add_argument("--allow-remote", action="store_true", help="Allow binding to a non-loopback host")
     p_server_serve.set_defaults(func=server_serve)
+
+    p_server_replay = server_sub.add_parser("replay-broadcast", parents=[db_parent])
+    p_server_replay.add_argument("--server-db")
+    p_server_replay.add_argument("--payload-id", type=int)
+    p_server_replay.add_argument("--since")
+    p_server_replay.add_argument("--until")
+    p_server_replay.add_argument("--replay-status")
+    p_server_replay.add_argument("--limit", type=int)
+    p_server_replay.add_argument("--format", choices=("table", "json"), default="table")
+    p_server_replay.set_defaults(func=replay_broadcast)
 
     args = parser.parse_args()
     args.func(args)
