@@ -2420,6 +2420,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
         columns = server_tool_default_columns(args.group_by)
         recent_columns = (
             "source_received_at",
+            "source_provider",
             "client_name",
             "tool_name",
             "success",
@@ -2427,8 +2428,6 @@ class ServerReceiver(BaseHTTPRequestHandler):
             "decision",
             "source",
             "mcp_server",
-            "session_id",
-            "call_id",
         )
 
         group_options = "\n".join(
@@ -3897,6 +3896,20 @@ def source_provider_expression(table: str = "usage_events") -> str:
     """
 
 
+def tool_source_provider_expression() -> str:
+    return """
+        case
+          when tool_events.event_name like 'claude_code.%'
+            or lower(coalesce(tool_events.model, '')) like 'claude%'
+            or lower(coalesce(tool_events.model, '')) like 'au.anthropic.%'
+            then 'Claude Code'
+          when tool_events.event_name like 'codex.%'
+            then 'Codex'
+          else 'Local OTEL'
+        end
+    """
+
+
 def source_label_expression() -> str:
     return f"""
         case
@@ -4110,9 +4123,15 @@ def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -
 
 def server_tool_recent_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
     where, params = server_tool_where_clause(args)
+    provider_expr = tool_source_provider_expression()
+    if where:
+        where = f"{where} and tool_events.success in ('true', 'false')"
+    else:
+        where = "where tool_events.success in ('true', 'false')"
     query = f"""
         select
             tool_events.source_received_at,
+            {provider_expr} as source_provider,
             coalesce(clients.display_name, tool_events.client_name, '(unknown)') as client_name,
             tool_events.tool_name,
             tool_events.event_name,
@@ -4120,9 +4139,7 @@ def server_tool_recent_rows(con: sqlite3.Connection, args: argparse.Namespace) -
             tool_events.duration_ms,
             tool_events.decision,
             tool_events.source,
-            tool_events.mcp_server,
-            tool_events.session_id,
-            tool_events.call_id
+            tool_events.mcp_server
         from tool_events
         left join clients on clients.client_name = tool_events.client_name
         {where}

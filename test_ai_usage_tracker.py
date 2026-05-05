@@ -2302,13 +2302,30 @@ class ServerHttpTests(unittest.TestCase):
                 "laptop",
                 [
                     {
+                        "client_tool_event_id": "tool-decision",
+                        "received_at": "2026-05-04T01:02:04+00:00",
+                        "signal": "logs",
+                        "event_name": "codex.tool_decision",
+                        "tool_name": "exec_command",
+                        "decision": "accept",
+                        "source": "config",
+                        "success": None,
+                        "attributes_json": "{}",
+                    },
+                    {
                         "client_tool_event_id": "tool-1",
                         "received_at": "2026-05-04T01:02:03+00:00",
                         "signal": "logs",
                         "event_name": "codex.tool_result",
+                        "model": "gpt-5.5",
+                        "session_id": "session-1",
                         "tool_name": "exec_command",
+                        "call_id": "call-1",
+                        "decision": "accept",
+                        "source": "config",
                         "success": "true",
                         "duration_ms": 42,
+                        "mcp_server": "",
                         "attributes_json": "{}",
                     }
                 ],
@@ -2320,6 +2337,7 @@ class ServerHttpTests(unittest.TestCase):
                 con,
                 {},
             )
+            recent_rows = app.server_tool_recent_rows(con, app.ServerReceiver.tool_reports_args({}))
 
             self.assertIn("Tool Reports", body)
             self.assertSharedNav(body, "tools")
@@ -2327,13 +2345,21 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("Grouped totals", body)
             self.assertIn("Recent tool calls", body)
             self.assertIn("By collector/tool", body)
+            self.assertIn("<th>provider</th>", body)
             self.assertIn("<th>collector</th>", body)
             self.assertIn('class="status ok"', body)
+            self.assertNotIn('class="status neutral"', body)
             self.assertIn("<td>Laptop</td>", body)
             self.assertNotIn("<td>laptop</td>", body)
+            self.assertIn("<td>Codex</td>", body)
             self.assertIn("<td>exec_command</td>", body)
             self.assertIn("<td class=\"num\">42</td>", body)
+            self.assertNotIn("session-1", body)
+            self.assertNotIn("call-1", body)
             self.assertIn('data-utc="2026-05-04T01:02:03+00:00"', body)
+            self.assertEqual(len(recent_rows), 1)
+            self.assertEqual(recent_rows[0]["source_received_at"], "2026-05-04T01:02:03+00:00")
+            self.assertEqual(recent_rows[0]["source_provider"], "Codex")
             self.assertIn("Intl.DateTimeFormat", body)
             con.close()
 
