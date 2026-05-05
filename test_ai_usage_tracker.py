@@ -2784,6 +2784,42 @@ class ServerHttpTests(unittest.TestCase):
         self.assertEqual(args.event_name, "")
         self.assertEqual(args.group_by, "event")
 
+    def test_tool_reports_label_claude_code_from_service_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            con = app.connect_server(db)
+            app.create_client_token(con, "workstation", "Workstation")
+            app.ingest_tool_events(
+                con,
+                "workstation",
+                [
+                    {
+                        "client_tool_event_id": "claude-bash-1",
+                        "received_at": "2026-05-04T01:02:03+00:00",
+                        "signal": "logs",
+                        "event_name": "tool_result",
+                        "tool_name": "Bash",
+                        "success": "true",
+                        "duration_ms": 28,
+                        "attributes_json": json.dumps(
+                            {
+                                "service.name": "claude-code",
+                                "service.version": "2.1.128",
+                            }
+                        ),
+                    }
+                ],
+            )
+            con.commit()
+
+            args = app.ServerReceiver.tool_reports_args({})
+            grouped_rows = app.server_tool_report_rows(con, args)
+            recent_rows = app.server_tool_recent_rows(con, args)
+            con.close()
+
+            self.assertEqual(grouped_rows[0]["source_provider"], "Claude Code")
+            self.assertEqual(recent_rows[0]["source_provider"], "Claude Code")
+
     def test_server_supports_client_model_grouping(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "server.sqlite"
