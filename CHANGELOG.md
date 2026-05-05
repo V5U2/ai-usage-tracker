@@ -1,8 +1,5 @@
 # Changelog
 
-Historical entries before `0.4.1` were reconstructed from git tags, merge
-commits, and merged pull request history after Release Please was introduced.
-
 ## [0.4.2](https://github.com/V5U2/ai-usage-tracker/compare/v0.4.1...v0.4.2) (2026-05-05)
 
 
