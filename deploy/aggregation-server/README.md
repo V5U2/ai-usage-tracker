@@ -4,6 +4,81 @@ The aggregation server runs once on a trusted host. It accepts compact batches
 from collectors, stores a server SQLite database, manages collector API tokens,
 and serves `/admin`, `/reports`, and `/tools`.
 
+## Linux Systemd
+
+Use this path when you want to run the aggregation server directly on a Linux
+host without Docker. The service runs from a source checkout, keeps config under
+`/etc/ai-usage-tracker`, and stores the server SQLite database under
+`/var/lib/ai-usage-tracker`.
+
+Create a dedicated service user and install the code:
+
+```bash
+sudo useradd --system --home /var/lib/ai-usage-tracker \
+  --shell /usr/sbin/nologin ai-usage-tracker
+sudo mkdir -p /opt/ai-usage-tracker /etc/ai-usage-tracker /var/lib/ai-usage-tracker
+sudo cp -R ai_usage_tracker.py ai_usage_tracker /opt/ai-usage-tracker/
+sudo cp server.example.toml /etc/ai-usage-tracker/server.toml
+sudo chown -R root:root /opt/ai-usage-tracker /etc/ai-usage-tracker
+sudo chown -R ai-usage-tracker:ai-usage-tracker /var/lib/ai-usage-tracker
+```
+
+Edit `/etc/ai-usage-tracker/server.toml` before starting the service. At
+minimum, set a strong `[aggregation_server].admin_api_key` if you will use the
+report APIs, and configure `[openrouter_broadcast]` only when OpenRouter should
+send traces directly to the server.
+
+Create `/etc/systemd/system/ai-usage-tracker-server.service`:
+
+```ini
+[Unit]
+Description=AI Usage Tracker aggregation server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-usage-tracker
+Group=ai-usage-tracker
+WorkingDirectory=/opt/ai-usage-tracker
+ExecStart=/usr/bin/python3 /opt/ai-usage-tracker/ai_usage_tracker.py --config /etc/ai-usage-tracker/server.toml server serve --host 127.0.0.1 --port 8318 --server-db /var/lib/ai-usage-tracker/ai_usage_server.sqlite
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ai-usage-tracker
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Start and inspect it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai-usage-tracker-server.service
+sudo systemctl status ai-usage-tracker-server.service --no-pager
+journalctl -u ai-usage-tracker-server.service -f
+curl -fsSL http://127.0.0.1:8318/reports >/dev/null
+```
+
+With `--host 127.0.0.1`, put a reverse proxy, VPN, or Cloudflare Tunnel in
+front of the service for remote collectors and browser access. If you
+intentionally expose it on a trusted LAN, change `--host` to `0.0.0.0`, add
+`--allow-remote`, and restrict access with a firewall or authenticated proxy.
+
+Update an existing Linux install by copying the new code over the old code and
+restarting the service. Do not overwrite `/etc/ai-usage-tracker/server.toml` or
+the SQLite database:
+
+```bash
+sudo cp -R ai_usage_tracker.py ai_usage_tracker /opt/ai-usage-tracker/
+sudo chown -R root:root /opt/ai-usage-tracker
+sudo systemctl restart ai-usage-tracker-server.service
+```
+
 ## Docker Compose
 
 The repository includes a Docker setup for the aggregation server component. It

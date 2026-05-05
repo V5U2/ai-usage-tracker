@@ -159,6 +159,7 @@ manual sync.
 
 Server deployment options:
 
+- Linux systemd: [deploy/aggregation-server/README.md#linux-systemd](deploy/aggregation-server/README.md#linux-systemd)
 - Docker Compose: [deploy/aggregation-server/README.md#docker-compose](deploy/aggregation-server/README.md#docker-compose)
 - Unraid: [deploy/aggregation-server/README.md#unraid](deploy/aggregation-server/README.md#unraid)
 - Cloudflare Access: [deploy/aggregation-server/README.md#cloudflare-access](deploy/aggregation-server/README.md#cloudflare-access)
