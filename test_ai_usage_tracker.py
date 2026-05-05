@@ -2180,6 +2180,55 @@ class ServerHttpTests(unittest.TestCase):
             self.assertEqual(stats["cost_value"], 1.5)
             self.assertEqual(stats["cost_unit"], "USD")
 
+    def test_server_reports_treat_nonzero_unitless_cost_as_mixed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            for event_id, cost_value, cost_unit in (
+                ("estimated-cost", 1.5, "USD"),
+                ("unknown-unit", 2.0, None),
+                ("unknown-zero", 0, None),
+            ):
+                app.ingest_usage_events(
+                    con,
+                    "client-a",
+                    [
+                        {
+                            "client_event_id": event_id,
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "logs",
+                            "model": "gpt-test",
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2,
+                            "cost_value": cost_value,
+                            "cost_unit": cost_unit,
+                            "attributes_json": "{}",
+                        }
+                    ],
+                )
+            con.commit()
+            base = {
+                "since": None,
+                "until": None,
+                "model": None,
+                "session_id": None,
+                "client_name": None,
+                "source_kind": None,
+                "workspace_label": None,
+                "api_key_label": None,
+                "provider_name": None,
+                "limit": 100,
+            }
+            rows = app.server_report_rows(con, argparse.Namespace(group_by="provider-source-model", **base))
+            stats = app.server_stats_dict(con)
+            con.close()
+
+            self.assertEqual(len(rows), 1)
+            self.assertIsNone(rows[0]["cost_value"])
+            self.assertEqual(rows[0]["cost_unit"], "mixed")
+            self.assertIsNone(stats["cost_value"])
+            self.assertEqual(stats["cost_unit"], "mixed")
+
     def test_server_report_filters_preserve_subsecond_precision(self):
         body = json.dumps(openrouter_trace_payload_with_time(1777856523123456000)).encode()
         config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
