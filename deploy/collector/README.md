@@ -204,7 +204,7 @@ It contains:
 - `server.example.toml`
 - `deploy/collector/`
 - `deploy/aggregation-server/`
-- `README.md` and `deploy/README.md`
+- `README.md`, `LICENSE`, and `deploy/README.md`
 
 To update a collector from an unpacked release tarball, run the matching update
 script from the extracted directory. The update scripts preserve the existing

@@ -44,6 +44,7 @@ jobs:
           cp collector.example.toml "${package_dir}/"
           cp server.example.toml "${package_dir}/"
           cp README.md "${package_dir}/"
+          cp LICENSE "${package_dir}/"
           test -d ai_usage_tracker
           cp -R ai_usage_tracker "${package_dir}/ai_usage_tracker"
           mkdir -p "${package_dir}/deploy"
