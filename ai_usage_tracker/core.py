@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Local OTLP/HTTP receiver for Codex usage observability.
+Local OTLP/HTTP receiver for AI usage observability.
 
 It stores every received payload in SQLite and extracts token-like numeric
 attributes from OTEL logs, traces, and metrics into a simple usage table.
-Use Codex's OTEL JSON protocol for best results.
+Use provider-native OTEL JSON or Broadcast payloads for best results.
 """
 
 from __future__ import annotations
@@ -33,10 +33,34 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
     tomllib = None  # type: ignore[assignment]
 
-DEFAULT_DB = Path(os.environ.get("CODEX_USAGE_DB", "codex_usage.sqlite"))
-DEFAULT_SERVER_DB = Path(os.environ.get("CODEX_USAGE_SERVER_DB", "codex_usage_server.sqlite"))
-DEFAULT_CONFIG = Path(os.environ.get("CODEX_USAGE_CONFIG", "codex_usage_observer.toml"))
-DEFAULT_MAX_BODY_BYTES = int(os.environ.get("CODEX_USAGE_MAX_BODY_BYTES", str(50 * 1024 * 1024)))
+def default_path(primary_env: str, legacy_env: str, default_name: str, legacy_name: str) -> Path:
+    if os.environ.get(primary_env):
+        return Path(os.environ[primary_env])
+    if os.environ.get(legacy_env):
+        return Path(os.environ[legacy_env])
+    default_path = Path(default_name)
+    legacy_path = Path(legacy_name)
+    if legacy_path.exists() and not default_path.exists():
+        return legacy_path
+    return default_path
+
+
+DEFAULT_DB = default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai_usage.sqlite", "codex_usage.sqlite")
+DEFAULT_SERVER_DB = default_path(
+    "AI_USAGE_SERVER_DB",
+    "CODEX_USAGE_SERVER_DB",
+    "ai_usage_server.sqlite",
+    "codex_usage_server.sqlite",
+)
+DEFAULT_CONFIG = default_path(
+    "AI_USAGE_CONFIG",
+    "CODEX_USAGE_CONFIG",
+    "ai_usage_tracker.toml",
+    "codex_usage_observer.toml",
+)
+DEFAULT_MAX_BODY_BYTES = int(
+    os.environ.get("AI_USAGE_MAX_BODY_BYTES", os.environ.get("CODEX_USAGE_MAX_BODY_BYTES", str(50 * 1024 * 1024)))
+)
 SENSITIVE_ATTR_KEYS = {
     "authorization",
     "cookie",
@@ -3915,7 +3939,7 @@ def main() -> int:
     add_report_output(p_report)
     p_report.set_defaults(func=report)
 
-    p_tools_report = sub.add_parser("tools-report", parents=[db_parent], help="Grouped Codex tool usage report")
+    p_tools_report = sub.add_parser("tools-report", parents=[db_parent], help="Grouped AI tool usage report")
     p_tools_report.add_argument(
         "--group-by",
         choices=("total", "day", "tool", "session", "event", "day-tool", "day-session"),

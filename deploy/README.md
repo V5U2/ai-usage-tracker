@@ -3,7 +3,7 @@
 This directory contains deployment helpers for the two runtime roles:
 
 - **Aggregation server**: runs once, commonly as a Docker container on Unraid.
-- **Collector**: runs beside Codex on each Mac, Linux, or WSL machine and
+- **Collector**: runs beside AI clients on each Mac, Linux, or WSL machine and
   forwards compact events to the aggregation server.
 
 ## Unraid Aggregation Server
@@ -41,7 +41,7 @@ installing collectors.
 
 ## Linux or WSL Collector
 
-Run this on the Linux or WSL machine where Codex runs:
+Run this on the Linux or WSL machine where an AI client runs:
 
 ```bash
 AGGREGATION_ENDPOINT=http://UNRAID_HOST_OR_IP:18418 \
@@ -63,19 +63,19 @@ accidentally overwrite a forwarding config with a local-only collector.
 Defaults:
 
 - Install dir: `~/.local/share/ai-usage-tracker`
-- Config: `~/.local/share/ai-usage-tracker/codex_usage_observer.toml`
-- Service: `~/.config/systemd/user/codex-usage-collector.service`
+- Config: `~/.local/share/ai-usage-tracker/ai_usage_tracker.toml`
+- Service: `~/.config/systemd/user/ai-usage-collector.service`
 - Listen address: `127.0.0.1:4318`
 
 Useful checks:
 
 ```bash
-systemctl --user status codex-usage-collector.service --no-pager
-journalctl --user -u codex-usage-collector.service -f
+systemctl --user status ai-usage-collector.service --no-pager
+journalctl --user -u ai-usage-collector.service -f
 ss -ltnp | grep ':4318'
-python3 ~/.local/share/ai-usage-tracker/codex_usage_observer.py \
-  --config ~/.local/share/ai-usage-tracker/codex_usage_observer.toml \
-  --db ~/.local/share/ai-usage-tracker/codex_usage.sqlite \
+python3 ~/.local/share/ai-usage-tracker/ai_usage_tracker.py \
+  --config ~/.local/share/ai-usage-tracker/ai_usage_tracker.toml \
+  --db ~/.local/share/ai-usage-tracker/ai_usage.sqlite \
   client sync-status
 ```
 
@@ -93,7 +93,7 @@ deploy/collector/update-remote-linux-systemd.sh linux-host other-host
 
 ## macOS Collector
 
-Run this on the Mac where Codex runs:
+Run this on the Mac where an AI client runs:
 
 ```bash
 AGGREGATION_ENDPOINT=http://UNRAID_HOST_OR_IP:18418 \
@@ -115,7 +115,7 @@ accidentally overwrite a forwarding config with a local-only collector.
 Defaults:
 
 - Install dir: `~/Library/Application Support/ai-usage-tracker`
-- Config: `~/Library/Application Support/ai-usage-tracker/codex_usage_observer.toml`
+- Config: `~/Library/Application Support/ai-usage-tracker/ai_usage_tracker.toml`
 - LaunchAgent label: `com.$USER.ai-usage-tracker.collector`
 - Logs: `~/Library/Logs/ai-usage-tracker`
 - Listen address: `127.0.0.1:4318`
@@ -148,9 +148,11 @@ The release workflow publishes a collector tarball named
 `ai-usage-tracker-collector-<tag>.tar.gz` alongside the server container image.
 It contains:
 
-- `codex_usage_observer.py`
+- `ai_usage_tracker.py`
+- `codex_usage_observer.py` compatibility wrapper
 - `ai_usage_tracker/`
-- `codex_usage_observer.example.toml`
+- `ai_usage_tracker.example.toml`
+- `codex_usage_observer.example.toml` legacy compatibility example
 - `deploy/collector/`
 - `README.md` and `deploy/README.md`
 
@@ -178,9 +180,10 @@ cleaner:
 - Keep config outside the package-owned code directory so upgrades never rewrite
   API keys or Cloudflare Access service-token credentials.
 
-## Codex OTEL Config
+## OTEL Source Config
 
-Each collector expects Codex to export OTEL logs to loopback:
+Each collector expects AI clients to export OTEL logs to loopback. For Codex,
+add this to `~/.codex/config.toml`:
 
 ```toml
 [otel]
@@ -192,5 +195,5 @@ exporter = { otlp-http = {
 }}
 ```
 
-Restart Codex after changing OTEL settings. The collector stores events locally
+Restart the AI client after changing OTEL settings. The collector stores events locally
 first, then forwards unsynced usage and tool events to the aggregation server.

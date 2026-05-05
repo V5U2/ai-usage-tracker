@@ -2,7 +2,7 @@
 
 This is a local and multi-machine observability setup for AI usage. It tracks
 token, cost, model, provider, workspace, and tool-call activity from supported
-sources such as Codex OTEL telemetry and OpenRouter Broadcast traces. It has two
+sources such as OTEL telemetry and OpenRouter Broadcast traces. It has two
 runtime roles:
 
 - **Local collectors** run beside apps that emit OTEL/HTTP telemetry. A
@@ -36,11 +36,10 @@ OpenRouter Broadcast --------------------^
   including local persistence and forwarding to an aggregation server.
 - `ai_usage_tracker/aggregation_server/`: central aggregation server surface,
   including client tokens, ingestion APIs, and web reports.
-- `ai_usage_tracker/core.py`: shared implementation used by both components
-  and the compatibility CLI.
-- `codex_usage_observer.py`: top-level compatibility CLI entry point. The file
-  name is retained for existing installs even though the project now tracks
-  broader AI usage.
+- `ai_usage_tracker/core.py`: shared implementation used by both components.
+- `ai_usage_tracker.py`: top-level CLI entry point.
+- `codex_usage_observer.py`: legacy compatibility CLI entry point retained for
+  existing installs.
 - `docker/`, `Dockerfile`, `docker-compose.yml`: containerized aggregation
   server setup.
 - `deploy/`: deployment scripts and templates for Unraid aggregation servers
@@ -53,13 +52,13 @@ collector binds to loopback by default and should generally stay local-only
 because OTEL payloads can include sensitive metadata.
 
 ```bash
-python3 codex_usage_observer.py serve --port 4318
+python3 ai_usage_tracker.py serve --port 4318
 ```
 
 The explicit client command is equivalent:
 
 ```bash
-python3 codex_usage_observer.py client serve --port 4318
+python3 ai_usage_tracker.py client serve --port 4318
 ```
 
 Leave that process running while you use a configured AI client. Use
@@ -91,7 +90,7 @@ deploy/collector/update-remote-linux-systemd.sh linux-host
 Tagged releases also include a collector tarball,
 `ai-usage-tracker-collector-<tag>.tar.gz`, with the collector code and deploy
 scripts. Extract it on a client and run the matching update script to upgrade
-without rewriting `codex_usage_observer.toml`.
+without rewriting `ai_usage_tracker.toml`.
 
 On WSL with systemd enabled, run the receiver as a user service so it starts
 automatically with the WSL user session:
@@ -106,7 +105,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/your-user/ai-usage-tracker
-ExecStart=/usr/bin/python3 /home/your-user/ai-usage-tracker/codex_usage_observer.py --config /home/your-user/ai-usage-tracker/codex_usage_observer.toml client serve --host 127.0.0.1 --port 4318
+ExecStart=/usr/bin/python3 /home/your-user/ai-usage-tracker/ai_usage_tracker.py --config /home/your-user/ai-usage-tracker/ai_usage_tracker.toml client serve --host 127.0.0.1 --port 4318
 Restart=on-failure
 RestartSec=5
 
@@ -136,10 +135,10 @@ ss -ltnp | rg ':4318'
 Optional: use a config file to control what gets persisted:
 
 ```bash
-python3 codex_usage_observer.py --config codex_usage_observer.toml serve --port 4318
+python3 ai_usage_tracker.py --config ai_usage_tracker.toml serve --port 4318
 ```
 
-Start from `codex_usage_observer.example.toml`. The main collector choices are:
+Start from `ai_usage_tracker.example.toml`. The main collector choices are:
 
 - `client_name`: names this machine/client for later aggregation.
 - `[collector]`: optional aggregation-server endpoint and client API key for forwarding.
@@ -177,14 +176,14 @@ deploy/collector/update-macos-launchd.sh
 Tagged releases also include a collector tarball,
 `ai-usage-tracker-collector-<tag>.tar.gz`, with the collector code and deploy
 scripts. Extract it on a client and run the matching update script to upgrade
-without rewriting `codex_usage_observer.toml`.
+without rewriting `ai_usage_tracker.toml`.
 
 AI clients generally do not start the receiver automatically. On macOS, install
 a user LaunchAgent if you want the receiver to start when you log in:
 
 ```bash
 mkdir -p "$HOME/Library/Application Support/ai-usage-tracker"
-cp -R codex_usage_observer.py ai_usage_tracker codex_usage_observer.toml \
+cp -R ai_usage_tracker.py ai_usage_tracker ai_usage_tracker.toml \
   "$HOME/Library/Application Support/ai-usage-tracker/"
 mkdir -p "$HOME/Library/Logs/ai-usage-tracker" "$HOME/Library/LaunchAgents"
 ```
@@ -202,9 +201,9 @@ Create `~/Library/LaunchAgents/com.example.ai-usage-tracker.receiver.plist`:
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
-    <string>/Users/your-user/Library/Application Support/ai-usage-tracker/codex_usage_observer.py</string>
+    <string>/Users/your-user/Library/Application Support/ai-usage-tracker/ai_usage_tracker.py</string>
     <string>--config</string>
-    <string>/Users/your-user/Library/Application Support/ai-usage-tracker/codex_usage_observer.toml</string>
+    <string>/Users/your-user/Library/Application Support/ai-usage-tracker/ai_usage_tracker.toml</string>
     <string>serve</string>
     <string>--port</string>
     <string>4318</string>
@@ -315,7 +314,7 @@ the server's admin UI. The server stores only token hashes, not the raw tokens.
 Start the aggregation server:
 
 ```bash
-python3 codex_usage_observer.py --config codex_usage_observer.toml server serve
+python3 ai_usage_tracker.py --config ai_usage_tracker.toml server serve
 ```
 
 By default it binds to `127.0.0.1:8318`. Use `--allow-remote` only on a trusted
@@ -349,14 +348,14 @@ drains up to `[collector].batch_size` pending usage rows and tool rows. Run a
 manual retry with:
 
 ```bash
-python3 codex_usage_observer.py client sync
+python3 ai_usage_tracker.py client sync
 ```
 
 Check collector sync progress with:
 
 ```bash
-python3 codex_usage_observer.py client sync-status
-python3 codex_usage_observer.py client sync-status --errors 5
+python3 ai_usage_tracker.py client sync-status
+python3 ai_usage_tracker.py client sync-status --errors 5
 ```
 
 The server accepts compact usage and tool-event batches from collectors at
@@ -430,14 +429,14 @@ parameters and the report APIs, including:
 
 The default `/reports` view is `provider-source-model`. In that view, `provider`
 is the system where usage came from, such as Codex, Claude Code, or OpenRouter.
-`source` is the identity inside that provider: for collector-synced Codex usage
+`source` is the identity inside that provider: for collector-synced local usage
 it is normally the collector or workspace, while for OpenRouter it is the
 workspace first, then API key label if no workspace is available.
 
 Retained Broadcast payloads can be replayed after parser changes:
 
 ```bash
-python3 codex_usage_observer.py --config codex_usage_observer.toml \
+python3 ai_usage_tracker.py --config ai_usage_tracker.toml \
   server replay-broadcast --replay-status ingested
 ```
 
@@ -522,12 +521,15 @@ docker compose down
 The image packages `docker/server.toml` as a default. On first start, the
 entrypoint copies it to `/data/server.toml`; later starts use the persisted
 `/data/server.toml`, so container upgrades do not overwrite local config.
+New containers use `/data/ai_usage_server.sqlite`. If an upgraded container
+finds an existing `/data/codex_usage_server.sqlite` and no generic DB yet, it
+continues using the legacy DB path.
 
 The container runs:
 
 ```bash
-python codex_usage_observer.py --config /data/server.toml server serve \
-  --host 0.0.0.0 --port 8318 --server-db /data/codex_usage_server.sqlite \
+python ai_usage_tracker.py --config /data/server.toml server serve \
+  --host 0.0.0.0 --port 8318 --server-db /data/ai_usage_server.sqlite \
   --allow-remote
 ```
 
@@ -606,50 +608,50 @@ collector tokens and `http://<unraid-ip>:18418/reports` to view usage reports.
 ## 3. Check token totals
 
 ```bash
-python3 codex_usage_observer.py summary
+python3 ai_usage_tracker.py summary
 ```
 
 For richer reporting:
 
 ```bash
-python3 codex_usage_observer.py report --group-by day-model
-python3 codex_usage_observer.py report --group-by session --since 2026-05-01
-python3 codex_usage_observer.py report --group-by total --format csv
+python3 ai_usage_tracker.py report --group-by day-model
+python3 ai_usage_tracker.py report --group-by session --since 2026-05-01
+python3 ai_usage_tracker.py report --group-by total --format csv
 ```
 
 To report captured tool calls:
 
 ```bash
-python3 codex_usage_observer.py tools-report
-python3 codex_usage_observer.py tools-report --group-by day-tool
-python3 codex_usage_observer.py tools-report --group-by event --event-name ""
+python3 ai_usage_tracker.py tools-report
+python3 ai_usage_tracker.py tools-report --group-by day-tool
+python3 ai_usage_tracker.py tools-report --group-by event --event-name ""
 ```
 
 To inspect extracted event attributes:
 
 ```bash
-python3 codex_usage_observer.py samples --limit 5
+python3 ai_usage_tracker.py samples --limit 5
 ```
 
 To inspect raw telemetry received by the local collector:
 
 ```bash
-python3 codex_usage_observer.py stats
-python3 codex_usage_observer.py raw --limit 20
-python3 codex_usage_observer.py dump-raw 1
+python3 ai_usage_tracker.py stats
+python3 ai_usage_tracker.py raw --limit 20
+python3 ai_usage_tracker.py dump-raw 1
 ```
 
 Raw payload bodies are not stored by default. If you temporarily set
 `raw_payload_body = true` for troubleshooting, raw OTEL payloads may include
 account metadata or prompt-related telemetry depending on your AI client or
-provider configuration. Do not commit `codex_usage.sqlite*` files or share
+provider configuration. Do not commit `ai_usage.sqlite*` files or share
 `dump-raw` output publicly. Extracted usage samples redact common credential and
 account fields.
 If you change storage settings after collecting data, run `reindex` to rebuild
 extracted usage rows from stored raw payloads:
 
 ```bash
-python3 codex_usage_observer.py --config codex_usage_observer.toml reindex
+python3 ai_usage_tracker.py --config ai_usage_tracker.toml reindex
 ```
 
 To also apply storage-retention settings to existing rows, for example clearing
@@ -657,7 +659,7 @@ previously stored raw payload bodies after setting `raw_payload_body = false`,
 run:
 
 ```bash
-python3 codex_usage_observer.py --config codex_usage_observer.toml cleanup
+python3 ai_usage_tracker.py --config ai_usage_tracker.toml cleanup
 ```
 
 ## Reports

@@ -1,6 +1,7 @@
 import argparse
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -139,6 +140,23 @@ class ComponentLayoutTests(unittest.TestCase):
     def test_legacy_component_modules_remain_compatible(self):
         self.assertIs(client_compat.Receiver, collector.Receiver)
         self.assertIs(server_compat.ServerReceiver, aggregation_server.ServerReceiver)
+
+    def test_default_path_prefers_generic_names_and_keeps_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
+            cwd = Path.cwd()
+            try:
+                os.chdir(tmp)
+                self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("ai.sqlite"))
+                Path("codex.sqlite").write_text("")
+                self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("codex.sqlite"))
+            finally:
+                os.chdir(cwd)
+
+        with patch.dict(os.environ, {"CODEX_USAGE_DB": "legacy.sqlite"}, clear=True):
+            self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("legacy.sqlite"))
+
+        with patch.dict(os.environ, {"AI_USAGE_DB": "generic.sqlite", "CODEX_USAGE_DB": "legacy.sqlite"}, clear=True):
+            self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("generic.sqlite"))
 
 
 class ExtractionTests(unittest.TestCase):

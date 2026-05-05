@@ -1,6 +1,6 @@
 # Collector Component
 
-The collector component is the local OTLP receiver. It accepts Codex telemetry,
+The collector component is the local OTLP receiver. It accepts AI client telemetry,
 stores raw payloads and extracted usage events in a local SQLite database, and
 forwards compact usage events to an aggregation server when `[collector]` is
 configured.
@@ -8,13 +8,13 @@ configured.
 Primary runtime command:
 
 ```bash
-python3 codex_usage_observer.py --config codex_usage_observer.toml serve --port 4318
+python3 ai_usage_tracker.py --config ai_usage_tracker.toml serve --port 4318
 ```
 
 Equivalent explicit client command:
 
 ```bash
-python3 codex_usage_observer.py --config codex_usage_observer.toml client serve --port 4318
+python3 ai_usage_tracker.py --config ai_usage_tracker.toml client serve --port 4318
 ```
 
 Relevant implementation surface:

@@ -4,13 +4,14 @@ Project-level instructions for coding agents working in this repository.
 
 ## Repository shape
 
-This is a stdlib Python project for collecting Codex OTEL usage locally and
+This is a stdlib Python project for collecting AI usage telemetry locally and
 optionally forwarding compact usage events to a central server. The central
 server can run directly with Python or through Docker Compose.
 
 Key entry points:
 
-- `codex_usage_observer.py`: compatibility CLI entry point
+- `ai_usage_tracker.py`: primary CLI entry point
+- `codex_usage_observer.py`: legacy compatibility CLI entry point
 - `ai_usage_tracker/core.py`: receiver, server, reporting, sync, and storage logic
 - `ai_usage_tracker/collector/`: local OTLP receiver, collector persistence, and forwarding surface
 - `ai_usage_tracker/aggregation_server/`: central ingestion, token admin, and reporting surface
@@ -28,6 +29,7 @@ Key entry points:
 - If a change affects receiver/server behavior, CLI flags, config keys, collector forwarding auth, Docker setup, launchd setup, sync semantics, reporting, storage, or operational workflows, update the relevant docs in the same task.
 - At minimum, review whether changes are needed in:
   - `README.md`
+  - `ai_usage_tracker.example.toml`
   - `codex_usage_observer.example.toml`
   - `docker/server.toml`
   - `deploy/unraid/ai-usage-tracker.xml`

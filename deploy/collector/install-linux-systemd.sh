@@ -5,8 +5,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 
 INSTALL_DIR=${INSTALL_DIR:-"$HOME/.local/share/ai-usage-tracker"}
-CONFIG_PATH=${CONFIG_PATH:-"$INSTALL_DIR/codex_usage_observer.toml"}
-SERVICE_NAME=${SERVICE_NAME:-codex-usage-collector.service}
+CONFIG_PATH=${CONFIG_PATH:-"$INSTALL_DIR/ai_usage_tracker.toml"}
+SERVICE_NAME=${SERVICE_NAME:-ai-usage-collector.service}
 SERVICE_DIR=${SERVICE_DIR:-"$HOME/.config/systemd/user"}
 CLIENT_NAME=${CLIENT_NAME:-"$(hostname)"}
 COLLECTOR_PORT=${COLLECTOR_PORT:-4318}
@@ -25,6 +25,7 @@ fi
 
 mkdir -p "$INSTALL_DIR" "$SERVICE_DIR"
 cp "$REPO_ROOT/codex_usage_observer.py" "$INSTALL_DIR/"
+cp "$REPO_ROOT/ai_usage_tracker.py" "$INSTALL_DIR/"
 rm -rf "$INSTALL_DIR/codex_usage_tracker" "$INSTALL_DIR/ai_usage_tracker"
 cp -R "$REPO_ROOT/ai_usage_tracker" "$INSTALL_DIR/"
 
@@ -62,13 +63,13 @@ EOF
 
 cat > "$SERVICE_DIR/$SERVICE_NAME" <<EOF
 [Unit]
-Description=Codex usage tracker local collector
+Description=AI usage tracker local collector
 After=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$PYTHON_BIN $INSTALL_DIR/codex_usage_observer.py --config $CONFIG_PATH client serve --host $COLLECTOR_HOST --port $COLLECTOR_PORT
+ExecStart=$PYTHON_BIN $INSTALL_DIR/ai_usage_tracker.py --config $CONFIG_PATH client serve --host $COLLECTOR_HOST --port $COLLECTOR_PORT
 Restart=on-failure
 RestartSec=5
 

@@ -3,7 +3,7 @@ client_name = "docker-server"
 [aggregation_server]
 host = "0.0.0.0"
 port = 8318
-db = "/data/codex_usage_server.sqlite"
+db = "/data/ai_usage_server.sqlite"
 
 [openrouter_broadcast]
 enabled = false

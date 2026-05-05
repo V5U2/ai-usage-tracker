@@ -7,7 +7,7 @@ SQLite, manages collector client tokens, and renders the `/reports` web view.
 Primary runtime command:
 
 ```bash
-python3 codex_usage_observer.py --config codex_usage_observer.toml server serve
+python3 ai_usage_tracker.py --config ai_usage_tracker.toml server serve
 ```
 
 Docker runs the same component with `/data` persistence:

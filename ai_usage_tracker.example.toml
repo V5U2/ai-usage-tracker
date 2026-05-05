@@ -13,12 +13,10 @@ batch_size = 100
 timeout_seconds = 10
 
 [aggregation_server]
-# Legacy compatibility example. New installs should prefer
-# `ai_usage_tracker.example.toml`.
-# Used by `python3 codex_usage_observer.py server serve`.
+# Used by `python3 ai_usage_tracker.py server serve`.
 host = "127.0.0.1"
 port = 8318
-db = "codex_usage_server.sqlite"
+db = "ai_usage_server.sqlite"
 # Required for JSON report APIs. The LAN-only admin UI does not require login.
 # admin_api_key = "change-me"
 

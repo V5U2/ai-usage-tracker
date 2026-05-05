@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility entry point for the legacy codex_usage_observer CLI."""
+"""Command-line entry point for AI usage tracker."""
 
 from ai_usage_tracker.core import *  # noqa: F401,F403
 from ai_usage_tracker.core import main
