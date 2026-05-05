@@ -1,0 +1,86 @@
+name: Bug report
+description: Report something that is broken or behaving unexpectedly.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please include enough detail to reproduce the issue without exposing API keys, access tokens, or private payload contents.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect to happen?
+      placeholder: The collector accepts the payload, but the aggregation server report does not show cost totals.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: Choose the main area where the problem appears.
+      options:
+        - Collector
+        - Aggregation server
+        - Docker deployment
+        - Linux/systemd deployment
+        - WSL2 deployment
+        - Reports/UI
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Run `ai-usage-tracker --version` or use the Docker image tag/commit SHA.
+      placeholder: v0.4.2
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python version, Docker image/tag if relevant, and whether this is local-only or collector-to-server forwarding.
+      placeholder: |
+        OS: Ubuntu 24.04
+        Python: 3.12
+        Runtime: Docker image ghcr.io/v5u2/ai-usage-tracker:v0.4.2
+        Mode: collector forwarding to aggregation server
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the shortest sequence that triggers the bug.
+      placeholder: |
+        1. Start the aggregation server with ...
+        2. Send a telemetry payload with ...
+        3. Open /reports and ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Paste relevant logs, command output, HTTP responses, or screenshots. Redact secrets before submitting.
+      render: shell
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: Paste only the relevant sanitized config sections, such as `[collector_forwarding]`, `[server]`, `[openrouter_broadcast]`, or `[pricing]`.
+      render: toml
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submit checks
+      options:
+        - label: I have searched existing issues and pull requests.
+          required: true
+        - label: I have removed or redacted API keys, tokens, private hostnames where needed, and raw payload contents that should not be public.
+          required: true
