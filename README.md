@@ -142,7 +142,8 @@ Optional: use a config file to control what gets persisted:
 python3 ai_usage_tracker.py --config ai_usage_tracker.toml serve --port 4318
 ```
 
-Start from `ai_usage_tracker.example.toml`. The main collector choices are:
+Start from `collector.example.toml`; use `server.example.toml` for aggregation
+server installs. The main collector choices are:
 
 - `client_name`: names this machine/client for later aggregation.
 - `[collector]`: optional aggregation-server endpoint and client API key for forwarding.
@@ -151,9 +152,6 @@ Start from `ai_usage_tracker.example.toml`. The main collector choices are:
 - `extracted_attributes`: store extracted attributes as `redacted`, `full`, or `none`.
 - `model`, `session_id`, `thread_id`: choose whether these dimensions are stored on usage rows.
 - `max_body_bytes`: reject oversized inbound payloads.
-
-The `[aggregation_server]` section is only used when this same checkout is also
-started with `server serve`.
 
 ### Optional API cost estimates
 
@@ -416,7 +414,7 @@ the server's admin UI. The server stores only token hashes, not the raw tokens.
 Start the aggregation server:
 
 ```bash
-python3 ai_usage_tracker.py --config ai_usage_tracker.toml server serve
+python3 ai_usage_tracker.py --config server.toml server serve
 ```
 
 By default it binds to `127.0.0.1:8318`. Use `--allow-remote` only on a trusted

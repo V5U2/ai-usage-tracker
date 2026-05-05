@@ -150,7 +150,8 @@ It contains:
 
 - `ai_usage_tracker.py`
 - `ai_usage_tracker/`
-- `ai_usage_tracker.example.toml`
+- `collector.example.toml`
+- `server.example.toml`
 - `deploy/collector/`
 - `README.md` and `deploy/README.md`
 
