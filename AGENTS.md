@@ -89,12 +89,12 @@ launchctl kickstart -k "gui/$(id -u)/com.example.ai-usage-tracker.receiver"
 
 ## Release automation rule
 
-- This repo does not currently declare release automation.
-- Do not bump versions, tag releases, publish images, or publish artifacts unless explicitly asked.
-- If release automation, changelog, or release-note files are later added, use conventional PR or squash-merge titles where appropriate:
+- This repo uses Release Please for normal releases. User-facing changes should use conventional PR or squash-merge titles where appropriate:
   - `feat: ...`
   - `fix: ...`
   - `docs: ...`
   - `chore: ...`
 - Use `!` or `BREAKING CHANGE:` only for intentional major-version changes.
+- Do not manually bump versions, tag releases, publish images, or publish artifacts unless explicitly asked.
+- Release Please owns `CHANGELOG.md`, `.release-please-manifest.json`, and the annotated `APP_VERSION` line in `ai_usage_tracker/core.py`.
 - Include release-impact context in PR summaries for user-facing changes: what changed, who is affected, and any migration or rollback notes.
