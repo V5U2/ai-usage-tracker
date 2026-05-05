@@ -152,7 +152,15 @@ class ComponentLayoutTests(unittest.TestCase):
                 out = io.StringIO()
                 with patch.object(app.sys, "argv", argv), redirect_stdout(out):
                     self.assertEqual(app.main(), 0)
-                self.assertEqual(out.getvalue().strip(), f"ai-usage-tracker {app.APP_VERSION}")
+                self.assertEqual(out.getvalue().strip(), app.version_text())
+
+    def test_version_text_hides_commit_for_plain_releases(self):
+        self.assertEqual(app.version_text("0.4.0", "abcdef1234567890"), "AI Usage Tracker - v0.4.0")
+        self.assertEqual(app.version_text("v0.4.0", "abcdef1234567890"), "AI Usage Tracker - v0.4.0")
+
+    def test_version_text_shows_commit_for_edge_versions(self):
+        self.assertEqual(app.version_text("edge", "abcdef1234567890"), "AI Usage Tracker - edge - (abcdef123456)")
+        self.assertEqual(app.version_text("0.4.0-edge", "abcdef1234567890"), "AI Usage Tracker - v0.4.0-edge - (abcdef123456)")
 
     def test_default_paths_use_generic_ai_usage_names(self):
         self.assertEqual(core.DEFAULT_DB, Path(os.environ.get("AI_USAGE_DB") or "ai_usage.sqlite"))
@@ -1266,7 +1274,8 @@ class ServerHttpTests(unittest.TestCase):
         self.assertIn('localStorage.getItem("ait-theme")', body)
         self.assertIn('rel="icon" type="image/svg+xml"', body)
         self.assertIn("M5%209.2H7V19H5V9.2", body)
-        self.assertIn(f"AI Usage Tracker v{app.APP_VERSION}", body)
+        self.assertIn(f'href="{app.REPO_URL}"', body)
+        self.assertIn(app.version_html(), body)
         self.assertIn('class="app-footer"', body)
 
     def test_server_ingest_auth_duplicate_and_revoked_token(self):

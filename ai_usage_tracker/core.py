@@ -16,6 +16,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -33,13 +34,13 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
     tomllib = None  # type: ignore[assignment]
 
-APP_VERSION = "0.4.0"
-
-
 def env_value(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
 
+REPO_URL = "https://github.com/V5U2/ai-usage-tracker"
+APP_VERSION = env_value("AI_USAGE_VERSION", "0.4.0")
+APP_COMMIT = env_value("AI_USAGE_COMMIT", "")
 DEFAULT_DB = Path(env_value("AI_USAGE_DB", "ai_usage.sqlite"))
 DEFAULT_SERVER_DB = Path(env_value("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite"))
 DEFAULT_CONFIG = Path(env_value("AI_USAGE_CONFIG", "ai_usage_tracker.toml"))
@@ -1952,8 +1953,35 @@ def server_nav(active: str) -> str:
     )
 
 
+def is_plain_release_version(version: str) -> bool:
+    return re.fullmatch(r"v?\d+\.\d+\.\d+", version) is not None
+
+
+def version_label(version: str = APP_VERSION) -> str:
+    if version.startswith("v") or not version[:1].isdigit():
+        return version
+    return f"v{version}"
+
+
+def version_suffix(version: str = APP_VERSION, commit: str = APP_COMMIT) -> str:
+    if is_plain_release_version(version) or not commit:
+        return ""
+    return f" - ({commit[:12]})"
+
+
+def version_text(version: str = APP_VERSION, commit: str = APP_COMMIT) -> str:
+    return f"AI Usage Tracker - {version_label(version)}{version_suffix(version, commit)}"
+
+
+def version_html(version: str = APP_VERSION, commit: str = APP_COMMIT) -> str:
+    return (
+        f'<a href="{html.escape(REPO_URL)}">AI Usage Tracker</a> - '
+        f"{html.escape(version_label(version))}{html.escape(version_suffix(version, commit))}"
+    )
+
+
 def server_footer() -> str:
-    return f'<footer class="app-footer">AI Usage Tracker v{html.escape(APP_VERSION)}</footer>'
+    return f'<footer class="app-footer">{version_html()}</footer>'
 
 
 def server_theme_script() -> str:
@@ -4106,7 +4134,7 @@ def samples(args: argparse.Namespace) -> None:
 
 
 def version(args: argparse.Namespace) -> None:
-    print(f"ai-usage-tracker {APP_VERSION}")
+    print(version_text())
 
 
 def add_report_filters(parser: argparse.ArgumentParser) -> None:
