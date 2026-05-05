@@ -17,6 +17,7 @@ Create a dedicated service user and install the code:
 sudo useradd --system --home /var/lib/ai-usage-tracker \
   --shell /usr/sbin/nologin ai-usage-tracker
 sudo mkdir -p /opt/ai-usage-tracker /etc/ai-usage-tracker /var/lib/ai-usage-tracker
+sudo rm -rf /opt/ai-usage-tracker/ai_usage_tracker
 sudo cp -R ai_usage_tracker.py ai_usage_tracker /opt/ai-usage-tracker/
 sudo cp server.example.toml /etc/ai-usage-tracker/server.toml
 sudo chown -R root:root /opt/ai-usage-tracker /etc/ai-usage-tracker
@@ -41,6 +42,7 @@ Type=simple
 User=ai-usage-tracker
 Group=ai-usage-tracker
 WorkingDirectory=/opt/ai-usage-tracker
+Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 /opt/ai-usage-tracker/ai_usage_tracker.py --config /etc/ai-usage-tracker/server.toml server serve --host 127.0.0.1 --port 8318 --server-db /var/lib/ai-usage-tracker/ai_usage_server.sqlite
 Restart=on-failure
 RestartSec=5
@@ -74,6 +76,7 @@ restarting the service. Do not overwrite `/etc/ai-usage-tracker/server.toml` or
 the SQLite database:
 
 ```bash
+sudo rm -rf /opt/ai-usage-tracker/ai_usage_tracker
 sudo cp -R ai_usage_tracker.py ai_usage_tracker /opt/ai-usage-tracker/
 sudo chown -R root:root /opt/ai-usage-tracker
 sudo systemctl restart ai-usage-tracker-server.service
@@ -82,7 +85,7 @@ sudo systemctl restart ai-usage-tracker-server.service
 ## Docker Compose
 
 The repository includes a Docker setup for the aggregation server component. It
-binds the container service to `127.0.0.1:8318` on the host and stores the
+publishes the container service on `127.0.0.1:8318` on the host and stores the
 server SQLite database plus persistent server config under `./data/server`.
 
 ```bash
@@ -125,6 +128,11 @@ python ai_usage_tracker.py --config /data/server.toml server serve \
   --host 0.0.0.0 --port 8318 --server-db /data/ai_usage_server.sqlite \
   --allow-remote
 ```
+
+The application inside the container listens on all container interfaces, but
+`docker-compose.yml` publishes it on host loopback only. Put a reverse proxy,
+VPN, or tunnel in front of it for remote collectors, or intentionally change the
+Compose port binding when exposing it on a trusted LAN.
 
 ## Unraid
 

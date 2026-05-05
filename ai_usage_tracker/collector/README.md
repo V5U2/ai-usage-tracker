@@ -8,13 +8,13 @@ configured.
 Primary runtime command:
 
 ```bash
-python3 ai_usage_tracker.py --config ai_usage_tracker.toml serve --port 4318
+python3 ai_usage_tracker.py --config collector.toml serve --port 4318
 ```
 
 Equivalent explicit client command:
 
 ```bash
-python3 ai_usage_tracker.py --config ai_usage_tracker.toml client serve --port 4318
+python3 ai_usage_tracker.py --config collector.toml client serve --port 4318
 ```
 
 Relevant implementation surface:

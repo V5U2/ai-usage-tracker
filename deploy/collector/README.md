@@ -1,8 +1,13 @@
 # Collector Deployment
 
-Collectors run beside AI clients on each Mac or Linux machine and forward
-compact usage events to the aggregation server. WSL2 uses the Linux path when
-systemd is enabled.
+Collectors run beside AI clients on each Mac or Linux machine. They can work
+local-only, or they can forward compact usage events to an aggregation server.
+WSL2 uses the Linux path when systemd is enabled.
+
+The install scripts below create a forwarding collector and therefore require
+`AGGREGATION_ENDPOINT` plus `COLLECTOR_API_KEY`. For local-only collection,
+start the collector manually from the main README or create a service with the
+same `client serve` command and no `[collector].endpoint` or API key.
 
 ## Linux Collector
 
