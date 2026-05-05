@@ -321,6 +321,24 @@ class ExtractionTests(unittest.TestCase):
         self.assertAlmostEqual(event["cost_value"], 3.9)
         self.assertEqual(event["cost_unit"], "USD")
 
+    def test_claude_api_cost_estimation_matches_hyphenated_model_family(self):
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_claude_api_costs=True))
+
+        event = app.usage_from_attrs(
+            "metrics",
+            "claude_code.token.usage",
+            {
+                "model": "claude-haiku-4-5-20251001",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+            },
+            config,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertAlmostEqual(event["cost_value"], 1.5)
+        self.assertEqual(event["cost_unit"], "USD")
+
     def test_claude_api_cost_estimation_is_opt_in_and_preserves_reported_cost(self):
         event = app.usage_from_attrs(
             "metrics",

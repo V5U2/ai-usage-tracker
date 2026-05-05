@@ -960,29 +960,53 @@ def normalize_model_name(model: str | None) -> str:
     return (model or "").strip().lower()
 
 
-def openai_api_price_for_model(model: str | None) -> tuple[float, float, float] | None:
+def model_name_variants(model: str | None) -> tuple[str, ...]:
     normalized = normalize_model_name(model)
     if not normalized:
+        return ()
+    variants = [normalized]
+    dotted_parts = normalized.split("-")
+    for index in range(len(dotted_parts) - 1):
+        if dotted_parts[index].isdigit() and dotted_parts[index + 1].isdigit():
+            variants.append(
+                "-".join(
+                    (
+                        *dotted_parts[:index],
+                        f"{dotted_parts[index]}.{dotted_parts[index + 1]}",
+                        *dotted_parts[index + 2 :],
+                    )
+                )
+            )
+    return tuple(dict.fromkeys(variants))
+
+
+def openai_api_price_for_model(model: str | None) -> tuple[float, float, float] | None:
+    variants = model_name_variants(model)
+    if not variants:
         return None
-    if normalized in OPENAI_API_MODEL_PRICES_USD_PER_1M:
-        return OPENAI_API_MODEL_PRICES_USD_PER_1M[normalized]
+    for normalized in variants:
+        if normalized in OPENAI_API_MODEL_PRICES_USD_PER_1M:
+            return OPENAI_API_MODEL_PRICES_USD_PER_1M[normalized]
     prices = sorted(OPENAI_API_MODEL_PRICES_USD_PER_1M.items(), key=lambda item: len(item[0]), reverse=True)
-    for prefix, price in prices:
-        if normalized.startswith(prefix + "-") or normalized.startswith(prefix + "."):
-            return price
+    for normalized in variants:
+        for prefix, price in prices:
+            if normalized.startswith(prefix + "-") or normalized.startswith(prefix + "."):
+                return price
     return None
 
 
 def claude_api_price_for_model(model: str | None) -> tuple[float, float, float, float, float] | None:
-    normalized = normalize_model_name(model)
-    if not normalized:
+    variants = model_name_variants(model)
+    if not variants:
         return None
-    if normalized in CLAUDE_API_MODEL_PRICES_USD_PER_1M:
-        return CLAUDE_API_MODEL_PRICES_USD_PER_1M[normalized]
+    for normalized in variants:
+        if normalized in CLAUDE_API_MODEL_PRICES_USD_PER_1M:
+            return CLAUDE_API_MODEL_PRICES_USD_PER_1M[normalized]
     prices = sorted(CLAUDE_API_MODEL_PRICES_USD_PER_1M.items(), key=lambda item: len(item[0]), reverse=True)
-    for prefix, price in prices:
-        if normalized.startswith(prefix + "-") or normalized.startswith(prefix + "."):
-            return price
+    for normalized in variants:
+        for prefix, price in prices:
+            if normalized.startswith(prefix + "-") or normalized.startswith(prefix + "."):
+                return price
     return None
 
 
