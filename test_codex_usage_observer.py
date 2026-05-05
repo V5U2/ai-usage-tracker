@@ -262,6 +262,54 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(reported["cost_value"], 0.42)
         self.assertEqual(reported["cost_unit"], "USD")
 
+    def test_can_estimate_claude_api_cost_when_enabled(self):
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_claude_api_costs=True))
+
+        event = app.usage_from_attrs(
+            "metrics",
+            "claude_code.token.usage",
+            {
+                "model": "claude-sonnet-4-5-20250929",
+                "input_tokens": "1000000",
+                "cache_read_input_tokens": "250000",
+                "cache_creation_input_tokens": "100000",
+                "output_tokens": "100000",
+            },
+            config,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertAlmostEqual(event["cost_value"], 3.9)
+        self.assertEqual(event["cost_unit"], "USD")
+
+    def test_claude_api_cost_estimation_is_opt_in_and_preserves_reported_cost(self):
+        event = app.usage_from_attrs(
+            "metrics",
+            "claude_code.token.usage",
+            {
+                "model": "claude-haiku-4-5-20251001",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+            },
+        )
+        self.assertEqual(event["cost_value"], 0)
+        self.assertIsNone(event["cost_unit"])
+
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_claude_api_costs=True))
+        reported = app.usage_from_attrs(
+            "metrics",
+            "claude_code.token.usage",
+            {
+                "model": "claude-haiku-4-5-20251001",
+                "input_tokens": "1000000",
+                "output_tokens": "100000",
+                "cost_usd": "0.19",
+            },
+            config,
+        )
+        self.assertEqual(reported["cost_value"], 0.19)
+        self.assertEqual(reported["cost_unit"], "USD")
+
     def test_extracts_observed_openrouter_broadcast_fields(self):
         body = json.dumps(observed_openrouter_trace_payload()).encode()
         config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
@@ -495,6 +543,7 @@ retain_payload_body = true
                 """
 [pricing]
 estimate_openai_api_costs = true
+estimate_claude_api_costs = true
 include_reasoning_tokens_as_output = false
 """,
                 encoding="utf-8",
@@ -503,6 +552,7 @@ include_reasoning_tokens_as_output = false
             config = app.load_config(config_path)
 
             self.assertTrue(config.pricing.estimate_openai_api_costs)
+            self.assertTrue(config.pricing.estimate_claude_api_costs)
             self.assertFalse(config.pricing.include_reasoning_tokens_as_output)
 
     def test_load_config_keeps_legacy_server_section_aliases(self):

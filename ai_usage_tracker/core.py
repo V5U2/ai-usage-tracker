@@ -251,6 +251,24 @@ OPENAI_API_MODEL_PRICES_USD_PER_1M: dict[str, tuple[float, float, float]] = {
     "gpt-5-nano": (0.05, 0.005, 0.40),
     "gpt-5": (1.25, 0.125, 10.00),
 }
+CLAUDE_API_MODEL_PRICES_USD_PER_1M: dict[str, tuple[float, float, float, float, float]] = {
+    # model/prefix: (input, 5m cache write, 1h cache write, cache hit/read, output)
+    "claude-opus-4.7": (5.00, 6.25, 10.00, 0.50, 25.00),
+    "claude-opus-4.6": (5.00, 6.25, 10.00, 0.50, 25.00),
+    "claude-opus-4.5": (5.00, 6.25, 10.00, 0.50, 25.00),
+    "claude-opus-4.1": (15.00, 18.75, 30.00, 1.50, 75.00),
+    "claude-opus-4": (15.00, 18.75, 30.00, 1.50, 75.00),
+    "claude-sonnet-4.6": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "claude-sonnet-4.5": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "claude-sonnet-4": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "claude-3-7-sonnet": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "claude-3.7-sonnet": (3.00, 3.75, 6.00, 0.30, 15.00),
+    "claude-haiku-4.5": (1.00, 1.25, 2.00, 0.10, 5.00),
+    "claude-3-5-haiku": (0.80, 1.00, 1.60, 0.08, 4.00),
+    "claude-3.5-haiku": (0.80, 1.00, 1.60, 0.08, 4.00),
+    "claude-3-opus": (15.00, 18.75, 30.00, 1.50, 75.00),
+    "claude-3-haiku": (0.25, 0.30, 0.50, 0.03, 1.25),
+}
 COST_UNIT_REPORT_GROUPS = {
     "client",
     "client-model",
@@ -306,6 +324,7 @@ class OpenRouterBroadcastConfig:
 @dataclass(frozen=True)
 class PricingConfig:
     estimate_openai_api_costs: bool = False
+    estimate_claude_api_costs: bool = False
     include_reasoning_tokens_as_output: bool = True
 
 
@@ -512,6 +531,7 @@ def load_config(path: Path | None) -> AppConfig:
     )
     pricing = PricingConfig(
         estimate_openai_api_costs=bool_config(pricing_data, "estimate_openai_api_costs", False),
+        estimate_claude_api_costs=bool_config(pricing_data, "estimate_claude_api_costs", False),
         include_reasoning_tokens_as_output=bool_config(pricing_data, "include_reasoning_tokens_as_output", True),
     )
     return AppConfig(
@@ -953,6 +973,19 @@ def openai_api_price_for_model(model: str | None) -> tuple[float, float, float] 
     return None
 
 
+def claude_api_price_for_model(model: str | None) -> tuple[float, float, float, float, float] | None:
+    normalized = normalize_model_name(model)
+    if not normalized:
+        return None
+    if normalized in CLAUDE_API_MODEL_PRICES_USD_PER_1M:
+        return CLAUDE_API_MODEL_PRICES_USD_PER_1M[normalized]
+    prices = sorted(CLAUDE_API_MODEL_PRICES_USD_PER_1M.items(), key=lambda item: len(item[0]), reverse=True)
+    for prefix, price in prices:
+        if normalized.startswith(prefix + "-") or normalized.startswith(prefix + "."):
+            return price
+    return None
+
+
 def estimate_openai_api_cost(
     model: str | None,
     input_tokens: int,
@@ -974,6 +1007,29 @@ def estimate_openai_api_cost(
         uncached_input * input_rate
         + cached_billable * cached_input_rate
         + output_billable * output_rate
+    ) / 1_000_000
+
+
+def estimate_claude_api_cost(
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
+) -> float:
+    price = claude_api_price_for_model(model)
+    if not price:
+        return 0.0
+    input_rate, cache_write_5m_rate, _cache_write_1h_rate, cache_read_rate, output_rate = price
+    cache_read_billable = max(cache_read_tokens, 0)
+    cache_write_billable = max(cache_creation_tokens, 0)
+    cache_adjusted_tokens = cache_read_billable + cache_write_billable
+    uncached_input = max(input_tokens - cache_adjusted_tokens, 0)
+    return (
+        uncached_input * input_rate
+        + cache_write_billable * cache_write_5m_rate
+        + cache_read_billable * cache_read_rate
+        + max(output_tokens, 0) * output_rate
     ) / 1_000_000
 
 
@@ -1011,6 +1067,11 @@ def usage_from_attrs(
     output_tokens = int_attr(attrs, TOKEN_KEYS["output"])
     total_tokens = int_attr(attrs, TOKEN_KEYS["total"])
     cached_tokens = int_attr(attrs, TOKEN_KEYS["cached"])
+    cache_read_tokens = int_attr(attrs, ("cache_read_tokens", "cache_read_input_tokens", "usage.cache_read_input_tokens"))
+    cache_creation_tokens = int_attr(
+        attrs,
+        ("cache_creation_tokens", "cache_creation_input_tokens", "usage.cache_creation_input_tokens"),
+    )
     reasoning_tokens = int_attr(attrs, TOKEN_KEYS["reasoning"])
     cost_value, cost_alias = float_attr(
         attrs,
@@ -1051,6 +1112,17 @@ def usage_from_attrs(
             cached_tokens,
             reasoning_tokens,
             config,
+        )
+        if estimated_cost:
+            cost_value = estimated_cost
+            cost_unit = "USD"
+    if config.pricing.estimate_claude_api_costs and not cost_value:
+        estimated_cost = estimate_claude_api_cost(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
         )
         if estimated_cost:
             cost_value = estimated_cost

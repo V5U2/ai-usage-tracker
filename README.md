@@ -151,22 +151,25 @@ Start from `ai_usage_tracker.example.toml`. The main collector choices are:
 The `[aggregation_server]` section is only used when this same checkout is also
 started with `server serve`.
 
-### Optional OpenAI API cost estimates
+### Optional API cost estimates
 
 Some local telemetry sources emit token counts but not cost. You can opt in to
-estimated USD costs for known OpenAI/Codex API model names:
+estimated USD costs for known OpenAI/Codex and Claude API model names:
 
 ```toml
 [pricing]
 estimate_openai_api_costs = true
+estimate_claude_api_costs = true
 include_reasoning_tokens_as_output = true
 ```
 
 Provider-reported costs always take precedence. Estimates use the built-in
-OpenAI API rates current when this release was built, so review
-`ai_usage_tracker/core.py` when OpenAI pricing changes. The estimate charges
-cached input tokens at the cached-input rate, remaining input tokens at the
-input rate, and output plus reasoning tokens at the output rate.
+OpenAI and Claude API rates current when this release was built, so review
+`ai_usage_tracker/core.py` when provider pricing changes. OpenAI estimates
+charge cached input tokens at cached-input rates, remaining input at input
+rates, and output plus reasoning tokens at output rates. Claude estimates charge
+cache read tokens at cache-hit rates, cache creation tokens at 5-minute
+cache-write rates, remaining input at input rates, and output at output rates.
 
 ### macOS auto-start with launchd
 
@@ -726,6 +729,7 @@ The parser already recognises common OpenTelemetry/LLM usage names such as:
 - `claude_code.cost.usage`
 - cached and reasoning token variants
 
-When `[pricing].estimate_openai_api_costs = true`, known OpenAI/Codex model
-names without provider-reported costs also get estimated USD cost values from
-the embedded API pricing table.
+When `[pricing].estimate_openai_api_costs = true` or
+`[pricing].estimate_claude_api_costs = true`, known OpenAI/Codex and Claude
+model names without provider-reported costs also get estimated USD cost values
+from embedded API pricing tables.
