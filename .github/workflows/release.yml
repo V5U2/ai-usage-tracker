@@ -54,9 +54,7 @@ jobs:
           rm -rf dist
           mkdir -p "${package_dir}"
           cp ai_usage_tracker.py "${package_dir}/"
-          cp codex_usage_observer.py "${package_dir}/"
           cp ai_usage_tracker.example.toml "${package_dir}/"
-          cp codex_usage_observer.example.toml "${package_dir}/"
           cp README.md "${package_dir}/"
           test -d ai_usage_tracker
           cp -R ai_usage_tracker "${package_dir}/ai_usage_tracker"

@@ -24,9 +24,8 @@ if [ -z "$AGGREGATION_ENDPOINT" ] || [ -z "$COLLECTOR_API_KEY" ]; then
 fi
 
 mkdir -p "$INSTALL_DIR" "$SERVICE_DIR"
-cp "$REPO_ROOT/codex_usage_observer.py" "$INSTALL_DIR/"
 cp "$REPO_ROOT/ai_usage_tracker.py" "$INSTALL_DIR/"
-rm -rf "$INSTALL_DIR/codex_usage_tracker" "$INSTALL_DIR/ai_usage_tracker"
+rm -rf "$INSTALL_DIR/ai_usage_tracker"
 cp -R "$REPO_ROOT/ai_usage_tracker" "$INSTALL_DIR/"
 
 {

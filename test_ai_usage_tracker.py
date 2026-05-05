@@ -4,15 +4,16 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-import codex_usage_observer as app
+import ai_usage_tracker as app
 import ai_usage_tracker.aggregation_server as aggregation_server
-import ai_usage_tracker.client as client_compat
+import ai_usage_tracker.client as client_module
 import ai_usage_tracker.collector as collector
 import ai_usage_tracker.core as core
-import ai_usage_tracker.server as server_compat
+import ai_usage_tracker.server as server_module
 
 
 def log_payload(attrs, body=None):
@@ -137,26 +138,41 @@ class ComponentLayoutTests(unittest.TestCase):
         self.assertIs(aggregation_server.server_serve, core.server_serve)
         self.assertIs(aggregation_server.server_report_rows, core.server_report_rows)
 
-    def test_legacy_component_modules_remain_compatible(self):
-        self.assertIs(client_compat.Receiver, collector.Receiver)
-        self.assertIs(server_compat.ServerReceiver, aggregation_server.ServerReceiver)
+    def test_component_alias_modules_expose_expected_surfaces(self):
+        self.assertIs(client_module.Receiver, collector.Receiver)
+        self.assertIs(server_module.ServerReceiver, aggregation_server.ServerReceiver)
 
-    def test_default_path_prefers_generic_names_and_keeps_legacy_fallback(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
-            cwd = Path.cwd()
-            try:
-                os.chdir(tmp)
-                self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("ai.sqlite"))
-                Path("codex.sqlite").write_text("")
-                self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("codex.sqlite"))
-            finally:
-                os.chdir(cwd)
+    def test_version_commands_print_package_version(self):
+        for argv in (
+            ["ai_usage_tracker.py", "version"],
+            ["ai_usage_tracker.py", "client", "version"],
+            ["ai_usage_tracker.py", "server", "version"],
+        ):
+            with self.subTest(argv=argv):
+                out = io.StringIO()
+                with patch.object(app.sys, "argv", argv), redirect_stdout(out):
+                    self.assertEqual(app.main(), 0)
+                self.assertEqual(out.getvalue().strip(), f"ai-usage-tracker {app.APP_VERSION}")
 
-        with patch.dict(os.environ, {"CODEX_USAGE_DB": "legacy.sqlite"}, clear=True):
-            self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("legacy.sqlite"))
+    def test_default_paths_use_generic_ai_usage_names(self):
+        self.assertEqual(core.DEFAULT_DB, Path(os.environ.get("AI_USAGE_DB") or "ai_usage.sqlite"))
+        self.assertEqual(core.DEFAULT_SERVER_DB, Path(os.environ.get("AI_USAGE_SERVER_DB") or "ai_usage_server.sqlite"))
+        self.assertEqual(core.DEFAULT_CONFIG, Path(os.environ.get("AI_USAGE_CONFIG") or "ai_usage_tracker.toml"))
 
-        with patch.dict(os.environ, {"AI_USAGE_DB": "generic.sqlite", "CODEX_USAGE_DB": "legacy.sqlite"}, clear=True):
-            self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("generic.sqlite"))
+    def test_blank_env_values_fall_back_to_generic_defaults(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AI_USAGE_DB": "",
+                "AI_USAGE_SERVER_DB": "",
+                "AI_USAGE_CONFIG": "",
+                "AI_USAGE_MAX_BODY_BYTES": "",
+            },
+        ):
+            self.assertEqual(core.env_value("AI_USAGE_DB", "ai_usage.sqlite"), "ai_usage.sqlite")
+            self.assertEqual(core.env_value("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite"), "ai_usage_server.sqlite")
+            self.assertEqual(core.env_value("AI_USAGE_CONFIG", "ai_usage_tracker.toml"), "ai_usage_tracker.toml")
+            self.assertEqual(core.env_value("AI_USAGE_MAX_BODY_BYTES", "52428800"), "52428800")
 
 
 class ExtractionTests(unittest.TestCase):
@@ -1250,6 +1266,8 @@ class ServerHttpTests(unittest.TestCase):
         self.assertIn('localStorage.getItem("ait-theme")', body)
         self.assertIn('rel="icon" type="image/svg+xml"', body)
         self.assertIn("M5%209.2H7V19H5V9.2", body)
+        self.assertIn(f"AI Usage Tracker v{app.APP_VERSION}", body)
+        self.assertIn('class="app-footer"', body)
 
     def test_server_ingest_auth_duplicate_and_revoked_token(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1279,6 +1297,69 @@ class ServerHttpTests(unittest.TestCase):
             app.revoke_client(con, "laptop")
             self.assertFalse(app.authenticate_client(con, "laptop", token))
             con.close()
+
+    def test_collector_ingest_updates_duplicate_usage_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            token = "unused"
+            first_event = {
+                "client_event_id": "evt-1",
+                "received_at": "2026-05-04T01:02:03+00:00",
+                "signal": "logs",
+                "event_name": "response.completed",
+                "model": "gpt-test",
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_tokens": 3,
+                "cached_tokens": 0,
+                "reasoning_tokens": 0,
+                "cost_value": 0,
+                "attributes_json": "{}",
+            }
+            updated_event = dict(first_event)
+            updated_event.update({"cost_value": 0.123, "cost_unit": "USD", "attributes_json": '{"updated": true}'})
+            payloads = [
+                {"client_name": "laptop", "events": [first_event]},
+                {"client_name": "laptop", "events": [updated_event]},
+            ]
+            responses = []
+
+            def run_request(payload):
+                body = json.dumps(payload).encode()
+                handler = object.__new__(app.ServerReceiver)
+                handler.db_path = db
+                handler.app_config = app.AppConfig()
+                handler.path = "/api/v1/usage-events"
+                handler.headers = {
+                    "content-length": str(len(body)),
+                    "content-type": "application/json",
+                    "authorization": f"Bearer {token}",
+                }
+                handler.rfile = io.BytesIO(body)
+                handler.wfile = io.BytesIO()
+                handler.send_response = responses.append
+                handler.send_header = lambda _key, _value: None
+                handler.end_headers = lambda: None
+                handler.do_POST()
+
+            con = app.connect_server(db)
+            token = app.create_client_token(con, "laptop", "Laptop")
+            con.commit()
+            con.close()
+
+            run_request(payloads[0])
+            run_request(payloads[1])
+
+            con = app.connect_server(db)
+            rows = con.execute("select * from usage_events").fetchall()
+            con.close()
+
+            self.assertEqual(responses, [200, 200])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["client_event_id"], "evt-1")
+            self.assertAlmostEqual(rows[0]["cost_value"], 0.123)
+            self.assertEqual(rows[0]["cost_unit"], "USD")
+            self.assertEqual(rows[0]["attributes_json"], '{"updated": true}')
 
     def test_openrouter_broadcast_ingest_auth_dedupe_and_fields(self):
         body = json.dumps(openrouter_trace_payload()).encode()
@@ -1679,7 +1760,7 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("<th>model</th>", body)
             self.assertIn("Collector", body)
             self.assertIn("Collectors", body)
-            self.assertIn("<td>Codex</td>", body)
+            self.assertIn("<td>Local OTEL</td>", body)
             self.assertIn("<td>Laptop</td>", body)
             self.assertNotIn("<td>laptop</td>", body)
             self.assertIn("<td>gpt-test</td>", body)
@@ -1699,7 +1780,7 @@ class ServerHttpTests(unittest.TestCase):
                 "laptop",
                 [
                     {
-                        "client_event_id": "codex-1",
+                        "client_event_id": "ai-1",
                         "received_at": "2026-05-04T01:02:03+00:00",
                         "signal": "logs",
                         "model": "gpt-test",
@@ -1719,7 +1800,7 @@ class ServerHttpTests(unittest.TestCase):
 
             self.assertEqual(args.group_by, "provider-source-model")
             grouped = {(row["source_provider"], row["source_label"], row["model"]): row["total_tokens"] for row in rows}
-            self.assertEqual(grouped[("Codex", "Laptop", "gpt-test")], 15)
+            self.assertEqual(grouped[("Local OTEL", "Laptop", "gpt-test")], 15)
             self.assertEqual(grouped[("OpenRouter", "agents", "openai/gpt-4o")], 17)
             self.assertEqual(app.server_default_columns("provider-source-model")[:3], ("source_provider", "source_label", "model"))
 
@@ -1948,7 +2029,7 @@ class ServerHttpTests(unittest.TestCase):
             con.close()
 
     def test_tool_reports_can_include_decisions_and_results(self):
-        args = app.ServerReceiver.tool_reports_args({"event_name": [""], "group_by": ["event"]})
+        args = app.ServerReceiver.tool_reports_args({"group_by": ["event"]})
 
         self.assertEqual(args.event_name, "")
         self.assertEqual(args.group_by, "event")

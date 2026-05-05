@@ -33,34 +33,17 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
     tomllib = None  # type: ignore[assignment]
 
-def default_path(primary_env: str, legacy_env: str, default_name: str, legacy_name: str) -> Path:
-    if os.environ.get(primary_env):
-        return Path(os.environ[primary_env])
-    if os.environ.get(legacy_env):
-        return Path(os.environ[legacy_env])
-    default_path = Path(default_name)
-    legacy_path = Path(legacy_name)
-    if legacy_path.exists() and not default_path.exists():
-        return legacy_path
-    return default_path
+APP_VERSION = "0.4.0"
 
 
-DEFAULT_DB = default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai_usage.sqlite", "codex_usage.sqlite")
-DEFAULT_SERVER_DB = default_path(
-    "AI_USAGE_SERVER_DB",
-    "CODEX_USAGE_SERVER_DB",
-    "ai_usage_server.sqlite",
-    "codex_usage_server.sqlite",
-)
-DEFAULT_CONFIG = default_path(
-    "AI_USAGE_CONFIG",
-    "CODEX_USAGE_CONFIG",
-    "ai_usage_tracker.toml",
-    "codex_usage_observer.toml",
-)
-DEFAULT_MAX_BODY_BYTES = int(
-    os.environ.get("AI_USAGE_MAX_BODY_BYTES", os.environ.get("CODEX_USAGE_MAX_BODY_BYTES", str(50 * 1024 * 1024)))
-)
+def env_value(name: str, default: str) -> str:
+    return os.environ.get(name) or default
+
+
+DEFAULT_DB = Path(env_value("AI_USAGE_DB", "ai_usage.sqlite"))
+DEFAULT_SERVER_DB = Path(env_value("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite"))
+DEFAULT_CONFIG = Path(env_value("AI_USAGE_CONFIG", "ai_usage_tracker.toml"))
+DEFAULT_MAX_BODY_BYTES = int(env_value("AI_USAGE_MAX_BODY_BYTES", str(50 * 1024 * 1024)))
 SENSITIVE_ATTR_KEYS = {
     "authorization",
     "cookie",
@@ -1969,6 +1952,10 @@ def server_nav(active: str) -> str:
     )
 
 
+def server_footer() -> str:
+    return f'<footer class="app-footer">AI Usage Tracker v{html.escape(APP_VERSION)}</footer>'
+
+
 def server_theme_script() -> str:
     return """
 (function () {
@@ -2072,6 +2059,7 @@ def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
     .value {{ font-size: 1.2rem; font-weight: 650; }}
     .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
     label {{ display: grid; gap: .25rem; }}
+    .app-footer {{ margin-top: 2rem; color: var(--muted); font-size: .8rem; }}
 {extra}"""
 
 
@@ -2251,7 +2239,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
             tool_name=query.get("tool_name", [None])[0] or None,
             session_id=query.get("session_id", [None])[0] or None,
             client_name=query.get("client_name", [None])[0] or None,
-            event_name=query.get("event_name", ["codex.tool_result"])[0],
+            event_name=query.get("event_name", [""])[0],
             limit=limit,
         )
 
@@ -2324,6 +2312,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       <tbody>{''.join(table_rows) or empty_row}</tbody>
     </table>
   </main>
+  {server_footer()}
 </body>
 </html>"""
 
@@ -2439,6 +2428,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </table>
     </section>
   </main>
+  {server_footer()}
 </body>
 </html>"""
 
@@ -2541,6 +2531,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </table>
     </section>
   </main>
+  {server_footer()}
 </body>
 </html>"""
 
@@ -2647,7 +2638,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 if not isinstance(tool_events, list):
                     self.send_json(400, {"error": "tool_events must be a list"})
                     return
-                accepted, duplicates = ingest_usage_events(con, client_name, events)
+                accepted, duplicates = ingest_usage_events(con, client_name, events, update_existing=True)
                 accepted_tool_events, duplicate_tool_events = ingest_tool_events(con, client_name, tool_events)
                 con.commit()
                 self.send_json(
@@ -3660,7 +3651,7 @@ def ingest_tool_events(con: sqlite3.Connection, client_name: str, events: Sequen
                     received_at,
                     str(event.get("received_at") or received_at),
                     str(event.get("signal") or "logs"),
-                    str(event.get("event_name") or "codex.tool_result"),
+                    str(event.get("event_name") or "tool_result"),
                     event.get("model"),
                     event.get("session_id"),
                     event.get("thread_id"),
@@ -3750,7 +3741,9 @@ def source_provider_expression(table: str = "usage_events") -> str:
             or {table}.source_kind = '{OPENROUTER_SOURCE_KIND}' then 'OpenRouter'
           when lower(coalesce({table}.source_kind, '')) in ('claude-code', 'claude_code')
             or {table}.event_name like 'claude_code.%' then 'Claude Code'
-          else 'Codex'
+          when lower(coalesce({table}.source_kind, '')) in ('codex', 'openai-codex')
+            or {table}.event_name like 'codex.%' then 'Codex'
+          else 'Local OTEL'
         end
     """
 
@@ -4112,6 +4105,10 @@ def samples(args: argparse.Namespace) -> None:
         print(json.dumps(dict(row), indent=2))
 
 
+def version(args: argparse.Namespace) -> None:
+    print(f"ai-usage-tracker {APP_VERSION}")
+
+
 def add_report_filters(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--since", help="UTC timestamp or YYYY-MM-DD lower bound")
     parser.add_argument("--until", help="UTC timestamp or YYYY-MM-DD upper bound")
@@ -4194,7 +4191,7 @@ def main() -> int:
         choices=("total", "day", "tool", "session", "event", "day-tool", "day-session"),
         default="tool",
     )
-    p_tools_report.add_argument("--event-name", default="codex.tool_result", help="Tool event type to include")
+    p_tools_report.add_argument("--event-name", default="", help="Only include one tool event type")
     p_tools_report.add_argument("--tool-name", help="Only include one tool")
     add_report_filters(p_tools_report)
     add_report_output(p_tools_report)
@@ -4222,6 +4219,9 @@ def main() -> int:
     p_samples = sub.add_parser("samples", parents=[db_parent])
     p_samples.add_argument("--limit", type=int, default=10)
     p_samples.set_defaults(func=samples)
+
+    p_version = sub.add_parser("version", help="Print version and exit")
+    p_version.set_defaults(func=version)
 
     p_sync = sub.add_parser(
         "sync", parents=[db_parent], help="Forward queued client usage events to the aggregation server"
@@ -4252,6 +4252,9 @@ def main() -> int:
     p_client_sync_status.add_argument("--errors", type=int, default=0, help="Show this many pending sync error groups")
     p_client_sync_status.set_defaults(func=sync_status)
 
+    p_client_version = client_sub.add_parser("version")
+    p_client_version.set_defaults(func=version)
+
     p_server = sub.add_parser("server", help="Aggregation server commands")
     server_sub = p_server.add_subparsers(dest="server_cmd", required=True)
     p_server_serve = server_sub.add_parser("serve", parents=[db_parent])
@@ -4270,6 +4273,9 @@ def main() -> int:
     p_server_replay.add_argument("--limit", type=int)
     p_server_replay.add_argument("--format", choices=("table", "json"), default="table")
     p_server_replay.set_defaults(func=replay_broadcast)
+
+    p_server_version = server_sub.add_parser("version")
+    p_server_version.set_defaults(func=version)
 
     args = parser.parse_args()
     args.func(args)

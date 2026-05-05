@@ -38,12 +38,32 @@ OpenRouter Broadcast --------------------^
   including client tokens, ingestion APIs, and web reports.
 - `ai_usage_tracker/core.py`: shared implementation used by both components.
 - `ai_usage_tracker.py`: top-level CLI entry point.
-- `codex_usage_observer.py`: legacy compatibility CLI entry point retained for
-  existing installs.
 - `docker/`, `Dockerfile`, `docker-compose.yml`: containerized aggregation
   server setup.
 - `deploy/`: deployment scripts and templates for Unraid aggregation servers
   and macOS, Linux, or WSL collectors.
+
+## Breaking naming changes
+
+This release removes the old Codex-specific compatibility surface. Use
+`ai_usage_tracker.py`, `ai_usage_tracker.example.toml`, `AI_USAGE_*`
+environment variables, and `ai_usage*.sqlite` database names for new installs.
+The removed names are not auto-detected:
+
+- `codex_usage_observer.py`
+- `codex_usage_observer.example.toml`
+- `CODEX_USAGE_DB`, `CODEX_USAGE_SERVER_DB`, `CODEX_USAGE_CONFIG`, and
+  `CODEX_USAGE_MAX_BODY_BYTES`
+- `codex_usage.sqlite` and `codex_usage_server.sqlite`
+
+To keep existing data, rename or explicitly pass the old paths before
+upgrading. For example:
+
+```bash
+mv codex_usage.sqlite ai_usage.sqlite
+mv codex_usage_server.sqlite ai_usage_server.sqlite
+mv codex_usage_observer.toml ai_usage_tracker.toml
+```
 
 ## 1. Run a local collector
 
@@ -132,6 +152,12 @@ Check that it is listening:
 ss -ltnp | rg ':4318'
 ```
 
+Check the installed collector version:
+
+```bash
+python3 ai_usage_tracker.py client version
+```
+
 Optional: use a config file to control what gets persisted:
 
 ```bash
@@ -154,7 +180,7 @@ started with `server serve`.
 ### Optional API cost estimates
 
 Some local telemetry sources emit token counts but not cost. You can opt in to
-estimated USD costs for known OpenAI/Codex and Claude API model names:
+estimated USD costs for known OpenAI API model names and Claude API model names:
 
 ```toml
 [pricing]
@@ -292,7 +318,7 @@ exporter = { otlp-http = {
 The important points are `otlp-http`, a local `/v1/logs` endpoint, and `json`.
 The receiver also stores non-JSON payloads raw, but token extraction needs JSON.
 Codex batches telemetry asynchronously, so start a fresh Codex session after
-changing this config and check the observer again after the session has ended.
+changing this config and check the collector again after the session has ended.
 
 ### Claude Code OTEL telemetry
 
@@ -383,9 +409,9 @@ After running Claude Code or Claude Desktop with telemetry enabled, check local
 extraction:
 
 ```bash
-python3 codex_usage_observer.py report --group-by model
-python3 codex_usage_observer.py tools-report --event-name ""
-python3 codex_usage_observer.py samples --limit 5
+python3 ai_usage_tracker.py report --group-by model
+python3 ai_usage_tracker.py tools-report
+python3 ai_usage_tracker.py samples --limit 5
 ```
 
 ## Aggregation server
@@ -595,6 +621,13 @@ docker compose ps
 docker logs --tail 50 ai-usage-tracker-server
 ```
 
+The image includes the `sqlite3` CLI for operational inspection and repair of
+the persisted server database:
+
+```bash
+docker exec ai-usage-tracker-server sqlite3 /data/ai_usage_server.sqlite ".tables"
+```
+
 Stop the server:
 
 ```bash
@@ -604,9 +637,7 @@ docker compose down
 The image packages `docker/server.toml` as a default. On first start, the
 entrypoint copies it to `/data/server.toml`; later starts use the persisted
 `/data/server.toml`, so container upgrades do not overwrite local config.
-New containers use `/data/ai_usage_server.sqlite`. If an upgraded container
-finds an existing `/data/codex_usage_server.sqlite` and no generic DB yet, it
-continues using the legacy DB path.
+New containers use `/data/ai_usage_server.sqlite`.
 
 The container runs:
 
@@ -765,9 +796,8 @@ Server report APIs and the `/reports` web page also support `client`,
 compatibility; the web UI labels them as collectors.
 
 `tools-report` supports `total`, `day`, `tool`, `session`, `event`,
-`day-tool`, and `day-session`. By default it reports completed
-`codex.tool_result` events when reporting Codex telemetry; pass
-`--event-name ""` to include decisions too.
+`day-tool`, and `day-session`. By default it reports all recognized tool
+events; pass `--event-name <event>` to focus on one event type.
 
 Filters use UTC timestamps. A plain date such as `2026-05-01` is accepted for
 `--since` and `--until`. CLI and API output keep server UTC timestamps; the web
@@ -793,6 +823,6 @@ The parser already recognises common OpenTelemetry/LLM usage names such as:
 - cached and reasoning token variants
 
 When `[pricing].estimate_openai_api_costs = true` or
-`[pricing].estimate_claude_api_costs = true`, known OpenAI/Codex and Claude
+`[pricing].estimate_claude_api_costs = true`, known OpenAI API and Claude
 model names without provider-reported costs also get estimated USD cost values
 from embedded API pricing tables.
