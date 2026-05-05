@@ -297,8 +297,43 @@ changing this config and check the observer again after the session has ended.
 ### Claude Code OTEL telemetry
 
 Claude Code can use the same local collector when it exports OTLP/HTTP JSON.
-Enable the metrics exporter for token and cost usage, and the logs exporter for
-tool activity:
+For persistent local tracking, add the OTEL variables to
+`~/.claude/settings.json` under the top-level `env` key:
+
+```json
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:4318/v1/metrics",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://127.0.0.1:4318/v1/logs"
+  }
+}
+```
+
+If `~/.claude/settings.json` already exists, merge these keys into its existing
+`env` object instead of replacing the whole file. Restart Claude Code after
+editing settings. Keep the local collector running while Claude Code is active.
+
+For beta Claude Code traces, add these keys to the same `env` object:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+    "OTEL_TRACES_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://127.0.0.1:4318/v1/traces"
+  }
+}
+```
+
+For a one-off shell session, export the same settings before launching
+`claude`:
 
 ```bash
 export CLAUDE_CODE_ENABLE_TELEMETRY=1
@@ -311,19 +346,47 @@ export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:4318/v1/logs
 claude
 ```
 
-For beta Claude Code traces, point the traces exporter at the same collector:
-
-```bash
-export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
-export OTEL_TRACES_EXPORTER=otlp
-export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces
-```
-
 The collector normalizes `claude_code.token.usage` metrics with `type` values
 of `input`, `output`, `cacheRead`, and `cacheCreation`; it also stores
 `claude_code.cost.usage` as USD cost and recognizes Claude Code tool result and
 tool decision events.
+
+### Claude Desktop / Cowork OTEL caveats
+
+Claude Desktop's Cowork OpenTelemetry export is separate from Claude Code
+telemetry. Anthropic documents it for Team and Enterprise plans, requires Claude
+Desktop 1.1.4173 or later, and exposes it through `Organization settings >
+Cowork`. Individual Pro or Max accounts do not currently have a documented way
+to point ordinary Claude Desktop chat telemetry at a local collector.
+
+When Cowork OTEL is available, configure it with the collector base URL and
+HTTP/JSON:
+
+```text
+OTLP endpoint: http://127.0.0.1:4318
+Protocol: HTTP/JSON
+Headers: leave empty for a local collector
+```
+
+Claude Desktop should append the OTLP signal paths itself, so use the base URL
+rather than `/v1/logs`, `/v1/metrics`, or `/v1/traces`. Do not point Claude
+Desktop at the aggregation server's `/api/v1/usage-events` endpoint; that route
+accepts this app's compact collector sync format, not raw OTLP.
+
+Desktop/Cowork telemetry can include prompt text, tool parameters, file paths,
+and user/account attributes. Keep the collector local or put an authenticated
+OTEL collector in front of it before exposing telemetry beyond the machine.
+
+### Verify Claude events
+
+After running Claude Code or Claude Desktop with telemetry enabled, check local
+extraction:
+
+```bash
+python3 codex_usage_observer.py report --group-by model
+python3 codex_usage_observer.py tools-report --event-name ""
+python3 codex_usage_observer.py samples --limit 5
+```
 
 ## Aggregation server
 
