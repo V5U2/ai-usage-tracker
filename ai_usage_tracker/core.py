@@ -49,6 +49,8 @@ SENSITIVE_ATTR_KEYS = {
     "authorization",
     "cookie",
     "set-cookie",
+    "trace.metadata.openrouter.creator_user_id",
+    "trace.metadata.openrouter.entity_id",
     "user.account_id",
     "user.email",
 }
@@ -253,19 +255,7 @@ CLAUDE_API_MODEL_PRICES_USD_PER_1M: dict[str, tuple[float, float, float, float, 
     "claude-3-opus": (15.00, 18.75, 30.00, 1.50, 75.00),
     "claude-3-haiku": (0.25, 0.30, 0.50, 0.03, 1.25),
 }
-COST_UNIT_REPORT_GROUPS = {
-    "client",
-    "client-model",
-    "day-client",
-    "day-model-client",
-    "source",
-    "workspace",
-    "api-key",
-    "provider",
-    "provider-source",
-    "provider-source-model",
-    "model-provider",
-}
+COST_UNIT_REPORT_GROUPS: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -1100,7 +1090,17 @@ def usage_from_attrs(
         ("cost_unit", "cost.currency", "gen_ai.usage.cost_unit", "gen_ai.usage.cost_currency", "openrouter.cost_unit"),
     )
     if cost_alias is not None and not cost_unit:
-        if cost_alias in ("gen_ai.usage.cost_usd", "usage.cost_usd", "cost_usd"):
+        if cost_alias in (
+            "gen_ai.usage.cost_usd",
+            "usage.cost_usd",
+            "cost_usd",
+            "cost",
+            "usage.cost",
+            "gen_ai.usage.total_cost",
+            "gen_ai.usage.cost",
+            "openrouter.cost",
+            "openrouter.credits",
+        ):
             cost_unit = "USD"
         else:
             cost_unit = "credits"
@@ -1163,7 +1163,9 @@ def usage_from_attrs(
                 "workspace.name",
                 "openrouter.workspace",
                 "openrouter.workspace_id",
-                "trace.metadata.openrouter.entity_id",
+                "trace.metadata.openrouter.workspace",
+                "trace.metadata.openrouter.workspace_id",
+                "trace.metadata.openrouter.workspace_name",
                 "trace.metadata.workspace",
                 "trace.metadata.workspace_id",
                 "trace.metadata.workspace_name",
@@ -3884,13 +3886,19 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
     if not cost_unit_grouped:
         cost_value_select = """
             case
-              when count(distinct coalesce(usage_events.cost_unit, '')) <= 1 then coalesce(sum(usage_events.cost_value), 0)
+              when count(distinct case
+                when coalesce(usage_events.cost_value, 0) != 0 then nullif(usage_events.cost_unit, '')
+              end) <= 1 then coalesce(sum(usage_events.cost_value), 0)
               else null
             end
         """
         cost_unit_select = """
             case
-              when count(distinct coalesce(usage_events.cost_unit, '')) <= 1 then max(usage_events.cost_unit)
+              when count(distinct case
+                when coalesce(usage_events.cost_value, 0) != 0 then nullif(usage_events.cost_unit, '')
+              end) <= 1 then max(case
+                when coalesce(usage_events.cost_value, 0) != 0 then nullif(usage_events.cost_unit, '')
+              end)
               else 'mixed'
             end
         """
@@ -4031,11 +4039,17 @@ def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
             coalesce(sum(cached_tokens), 0) as cached_tokens,
             coalesce(sum(reasoning_tokens), 0) as reasoning_tokens,
             case
-              when count(distinct coalesce(cost_unit, '')) <= 1 then coalesce(sum(cost_value), 0)
+              when count(distinct case
+                when coalesce(cost_value, 0) != 0 then nullif(cost_unit, '')
+              end) <= 1 then coalesce(sum(cost_value), 0)
               else null
             end as cost_value,
             case
-              when count(distinct coalesce(cost_unit, '')) <= 1 then max(cost_unit)
+              when count(distinct case
+                when coalesce(cost_value, 0) != 0 then nullif(cost_unit, '')
+              end) <= 1 then max(case
+                when coalesce(cost_value, 0) != 0 then nullif(cost_unit, '')
+              end)
               else 'mixed'
             end as cost_unit,
             min(source_received_at) as first_seen,

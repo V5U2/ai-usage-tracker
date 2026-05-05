@@ -804,6 +804,10 @@ Filters use UTC timestamps. A plain date such as `2026-05-01` is accepted for
 views display those UTC values in the browser's local time zone. Output formats
 are `table`, `csv`, and `json`.
 
+Report cost totals are grouped by the visible report dimensions. Rows with no
+cost or zero cost do not split otherwise matching groups, and a group only shows
+`mixed` when it contains nonzero costs in more than one unit.
+
 ## Limits
 
 This uses whatever each source emits through OTEL or provider webhooks. If a

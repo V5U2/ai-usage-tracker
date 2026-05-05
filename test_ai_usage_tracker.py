@@ -400,10 +400,40 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(event["model"], "moonshotai/kimi-k2.5")
         self.assertEqual(event["total_tokens"], 15111)
         self.assertAlmostEqual(event["cost_value"], 0.00639196)
-        self.assertEqual(event["cost_unit"], "credits")
-        self.assertEqual(event["workspace_label"], "org_123")
+        self.assertEqual(event["cost_unit"], "USD")
+        self.assertIsNone(event["workspace_label"])
         self.assertEqual(event["api_key_label"], "prod-key")
         self.assertEqual(event["provider_name"], "Chutes")
+        attrs = json.loads(event["attributes_json"])
+        self.assertEqual(attrs["trace.metadata.openrouter.entity_id"], "[redacted]")
+
+    def test_openrouter_source_label_falls_back_to_api_key_name(self):
+        body = json.dumps(observed_openrouter_trace_payload()).encode()
+        config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            self.assertEqual(app.ingest_openrouter_broadcast(con, body, config), (1, 0))
+            con.commit()
+            args = argparse.Namespace(
+                group_by="provider-source-model",
+                since=None,
+                until=None,
+                model=None,
+                session_id=None,
+                client_name=None,
+                source_kind=None,
+                workspace_label=None,
+                api_key_label=None,
+                provider_name=None,
+                limit=100,
+            )
+            rows = app.server_report_rows(con, args)
+            con.close()
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["source_provider"], "OpenRouter")
+            self.assertEqual(rows[0]["source_label"], "prod-key")
+            self.assertEqual(rows[0]["model"], "moonshotai/kimi-k2.5")
 
     def test_extracts_claude_code_token_and_cost_metrics(self):
         payload = claude_code_metric_payload(
@@ -1412,7 +1442,7 @@ class ServerHttpTests(unittest.TestCase):
             self.assertEqual(rows[0]["api_key_label"], "prod-key")
             self.assertEqual(rows[0]["provider_name"], "OpenAI")
             self.assertAlmostEqual(rows[0]["cost_value"], 0.0123)
-            self.assertEqual(rows[0]["cost_unit"], "credits")
+            self.assertEqual(rows[0]["cost_unit"], "USD")
             self.assertEqual([row["replay_status"] for row in payloads], ["ingested", "ingested"])
             self.assertTrue(all(row["body_len"] > 0 for row in payloads))
 
@@ -1518,7 +1548,7 @@ class ServerHttpTests(unittest.TestCase):
             self.assertEqual(result, {"payloads": 1, "accepted": 0, "duplicates": 1, "errors": 0})
             self.assertEqual(row_count, 1)
             self.assertAlmostEqual(usage["cost_value"], 0.0123)
-            self.assertEqual(usage["cost_unit"], "credits")
+            self.assertEqual(usage["cost_unit"], "USD")
             self.assertEqual(usage["workspace_label"], "agents")
             self.assertEqual(usage["api_key_label"], "prod-key")
             self.assertEqual(usage["provider_name"], "OpenAI")
@@ -1840,7 +1870,7 @@ class ServerHttpTests(unittest.TestCase):
             self.assertEqual(rows[0]["workspace_label"], "agents")
             self.assertEqual(rows[0]["total_tokens"], 17)
             self.assertAlmostEqual(rows[0]["cost_value"], 0.0123)
-            self.assertEqual(rows[0]["cost_unit"], "credits")
+            self.assertEqual(rows[0]["cost_unit"], "USD")
 
     def test_server_reports_do_not_mix_cost_units(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1881,8 +1911,9 @@ class ServerHttpTests(unittest.TestCase):
             rows = app.server_report_rows(con, args)
             con.close()
 
-            self.assertEqual({row["cost_unit"] for row in rows}, {"credits", "USD"})
-            self.assertTrue(all(row["cost_value"] == 1.5 for row in rows))
+            self.assertEqual(len(rows), 1)
+            self.assertIsNone(rows[0]["cost_value"])
+            self.assertEqual(rows[0]["cost_unit"], "mixed")
 
     def test_server_reports_do_not_split_hidden_cost_units(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1928,6 +1959,56 @@ class ServerHttpTests(unittest.TestCase):
                 self.assertIsNone(rows[0]["cost_value"])
                 self.assertEqual(rows[0]["cost_unit"], "mixed")
             con.close()
+
+    def test_server_reports_ignore_zero_cost_rows_when_selecting_unit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            for event_id, cost_value, cost_unit in (
+                ("estimated-cost", 1.5, "USD"),
+                ("unknown-zero", 0, None),
+            ):
+                app.ingest_usage_events(
+                    con,
+                    "client-a",
+                    [
+                        {
+                            "client_event_id": event_id,
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "logs",
+                            "model": "gpt-test",
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2,
+                            "cost_value": cost_value,
+                            "cost_unit": cost_unit,
+                            "attributes_json": "{}",
+                        }
+                    ],
+                )
+            con.commit()
+            base = {
+                "since": None,
+                "until": None,
+                "model": None,
+                "session_id": None,
+                "client_name": None,
+                "source_kind": None,
+                "workspace_label": None,
+                "api_key_label": None,
+                "provider_name": None,
+                "limit": 100,
+            }
+            total_rows = app.server_report_rows(con, argparse.Namespace(group_by="total", **base))
+            provider_rows = app.server_report_rows(con, argparse.Namespace(group_by="provider-source-model", **base))
+            stats = app.server_stats_dict(con)
+            con.close()
+
+            for rows in (total_rows, provider_rows):
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["cost_value"], 1.5)
+                self.assertEqual(rows[0]["cost_unit"], "USD")
+            self.assertEqual(stats["cost_value"], 1.5)
+            self.assertEqual(stats["cost_unit"], "USD")
 
     def test_server_report_filters_preserve_subsecond_precision(self):
         body = json.dumps(openrouter_trace_payload_with_time(1777856523123456000)).encode()
