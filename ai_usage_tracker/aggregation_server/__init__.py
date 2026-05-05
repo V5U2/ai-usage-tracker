@@ -4,7 +4,7 @@ The aggregation server accepts compact usage batches from collectors, stores
 client-scoped rows in SQLite, manages client tokens, and renders reports.
 """
 
-from codex_usage_tracker.core import (  # noqa: F401
+from ai_usage_tracker.core import (  # noqa: F401
     AppConfig,
     DEFAULT_APP_CONFIG,
     DEFAULT_CONFIG,

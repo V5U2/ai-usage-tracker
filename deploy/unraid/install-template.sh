@@ -7,7 +7,7 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 UNRAID_HOST=${UNRAID_HOST:-}
 TEMPLATE_NAME=${TEMPLATE_NAME:-my-ai-usage-tracker.xml}
 DEST_DIR=${DEST_DIR:-/boot/config/plugins/dockerMan/templates-user}
-SOURCE_TEMPLATE=${SOURCE_TEMPLATE:-$REPO_ROOT/unraid/ai-usage-tracker.xml}
+SOURCE_TEMPLATE=${SOURCE_TEMPLATE:-$REPO_ROOT/deploy/unraid/ai-usage-tracker.xml}
 
 if [ ! -f "$SOURCE_TEMPLATE" ]; then
   echo "Template not found: $SOURCE_TEMPLATE" >&2

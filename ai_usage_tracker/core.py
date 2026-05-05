@@ -81,6 +81,8 @@ TOKEN_KEYS = {
         "cached_tokens",
         "cached_token_count",
         "input_cached_tokens",
+        "cache_read_tokens",
+        "cache_creation_tokens",
         "usage.cached_tokens",
         "usage.input_cached_tokens",
         "gen_ai.usage.input_cached_tokens",
@@ -121,7 +123,9 @@ TOOL_REPORT_COLUMNS = (
 )
 DISPLAY_NAMES = {
     "period": "day",
-    "client_name": "client",
+    "source_provider": "provider",
+    "source_label": "source",
+    "client_name": "collector",
     "model": "model",
     "session_id": "session",
     "events": "events",
@@ -153,10 +157,10 @@ DISPLAY_NAMES = {
     "newest_local": "newest_local",
     "newest_synced": "newest_synced",
     "last_synced_at": "last_sync",
-    "source_kind": "source",
+    "source_kind": "source_kind",
     "workspace_label": "workspace",
     "api_key_label": "api_key",
-    "provider_name": "provider",
+    "provider_name": "model_provider",
     "cost_value": "cost",
     "cost_unit": "unit",
     "trace_id": "trace",
@@ -194,7 +198,14 @@ NUMERIC_COLUMNS = {
 COST_COLUMNS = {"cost_value"}
 TIME_COLUMNS = {"first_seen", "last_seen", "source_received_at", "newest_local", "newest_synced", "last_synced_at", "replayed_at"}
 HTML_TIME_COLUMNS = TIME_COLUMNS | {"created_at", "updated_at", "revoked_at"}
-TOOL_EVENT_NAMES = {"codex.tool_decision", "codex.tool_result"}
+TOOL_EVENT_NAMES = {
+    "codex.tool_decision",
+    "codex.tool_result",
+    "claude_code.tool_decision",
+    "claude_code.tool_result",
+    "tool_decision",
+    "tool_result",
+}
 VERBOSE_TOOL_ATTRS = {"arguments", "output"}
 OPENROUTER_BROADCAST_CLIENT = "openrouter-broadcast"
 OPENROUTER_SOURCE_KIND = "openrouter_broadcast"
@@ -207,6 +218,9 @@ COST_UNIT_REPORT_GROUPS = {
     "workspace",
     "api-key",
     "provider",
+    "provider-source",
+    "provider-source-model",
+    "model-provider",
 }
 
 
@@ -868,6 +882,24 @@ def has_token_signal(attrs: dict[str, Any]) -> bool:
     return any(any(alias in keys for alias in aliases) for aliases in TOKEN_KEYS.values())
 
 
+def normalize_claude_code_metric_attrs(name: str | None, attrs: dict[str, Any]) -> dict[str, Any]:
+    if name == "claude_code.token.usage":
+        value = attrs.get(name)
+        token_type = attrs.get("type")
+        if token_type == "input":
+            attrs["input_tokens"] = value
+        elif token_type == "output":
+            attrs["output_tokens"] = value
+        elif token_type == "cacheRead":
+            attrs["cache_read_tokens"] = value
+        elif token_type == "cacheCreation":
+            attrs["cache_creation_tokens"] = value
+    elif name == "claude_code.cost.usage":
+        attrs["cost_usd"] = attrs.get(name)
+        attrs["cost_unit"] = "USD"
+    return attrs
+
+
 def usage_from_attrs(
     signal: str,
     event_name: str | None,
@@ -885,6 +917,7 @@ def usage_from_attrs(
         (
             "gen_ai.usage.cost_usd",
             "usage.cost_usd",
+            "cost_usd",
             "cost",
             "usage.cost",
             "gen_ai.usage.total_cost",
@@ -898,12 +931,12 @@ def usage_from_attrs(
         ("cost_unit", "cost.currency", "gen_ai.usage.cost_unit", "gen_ai.usage.cost_currency", "openrouter.cost_unit"),
     )
     if cost_value and not cost_unit:
-        if cost_alias in ("gen_ai.usage.cost_usd", "usage.cost_usd"):
+        if cost_alias in ("gen_ai.usage.cost_usd", "usage.cost_usd", "cost_usd"):
             cost_unit = "USD"
         else:
             cost_unit = "credits"
     if not any((input_tokens, output_tokens, total_tokens, cached_tokens, reasoning_tokens)):
-        if not has_token_signal(attrs):
+        if not has_token_signal(attrs) and cost_alias is None:
             return None
 
     if total_tokens == 0 and (input_tokens or output_tokens):
@@ -965,6 +998,7 @@ def usage_from_attrs(
                 "provider",
                 "gen_ai.system",
                 "gen_ai.response.provider",
+                "gen_ai.request.provider",
                 "openrouter.provider",
             ),
         ),
@@ -984,7 +1018,7 @@ def tool_event_from_attrs(
     event_name = event_name or first_attr(attrs, ("event.name", "name"))
     if event_name not in TOOL_EVENT_NAMES:
         return None
-    tool_name = first_attr(attrs, ("tool_name", "gen_ai.tool.name"))
+    tool_name = first_attr(attrs, ("tool_name", "tool.name", "gen_ai.tool.name"))
     if not tool_name:
         return None
     return {
@@ -1000,12 +1034,12 @@ def tool_event_from_attrs(
         if config.storage.thread_id
         else None,
         "tool_name": tool_name,
-        "call_id": first_attr(attrs, ("call_id", "tool_call_id", "gen_ai.tool.call.id")),
-        "decision": first_attr(attrs, ("decision",)),
-        "source": first_attr(attrs, ("source",)),
+        "call_id": first_attr(attrs, ("call_id", "tool_call_id", "tool_use_id", "gen_ai.tool.call.id")),
+        "decision": first_attr(attrs, ("decision", "decision_type")),
+        "source": first_attr(attrs, ("source", "decision_source")),
         "success": first_attr(attrs, ("success",)),
         "duration_ms": optional_int_attr(attrs, ("duration_ms", "duration")),
-        "mcp_server": first_attr(attrs, ("mcp_server",)),
+        "mcp_server": first_attr(attrs, ("mcp_server", "mcp_server_scope", "server_name")),
         "attributes_json": stored_tool_attributes_json(attrs, config),
     }
 
@@ -1064,6 +1098,7 @@ def iter_metrics(payload: dict[str, Any]) -> Iterable[tuple[str | None, dict[str
                     value = point.get("asInt", point.get("asDouble"))
                     if name and value is not None:
                         attrs[str(name)] = value
+                    attrs = normalize_claude_code_metric_attrs(name, attrs)
                     yield name, attrs
 
 
@@ -1516,11 +1551,41 @@ def server_default_columns(group_by: str) -> tuple[str, ...]:
         "source": "source_kind",
         "workspace": "workspace_label",
         "api-key": "api_key_label",
-        "provider": "provider_name",
+        "provider": "source_provider",
+        "model-provider": "provider_name",
     }
     if group_by in source_columns:
         return (
             source_columns[group_by],
+            "events",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_tokens",
+            "reasoning_tokens",
+            "cost_value",
+            "cost_unit",
+            "last_seen",
+        )
+    if group_by == "provider-source":
+        return (
+            "source_provider",
+            "source_label",
+            "events",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_tokens",
+            "reasoning_tokens",
+            "cost_value",
+            "cost_unit",
+            "last_seen",
+        )
+    if group_by == "provider-source-model":
+        return (
+            "source_provider",
+            "source_label",
+            "model",
             "events",
             "input_tokens",
             "output_tokens",
@@ -1869,6 +1934,9 @@ class Receiver(BaseHTTPRequestHandler):
 class ServerReceiver(BaseHTTPRequestHandler):
     REPORT_GROUPS = (
         "total",
+        "provider-source-model",
+        "provider-source",
+        "provider",
         "day",
         "model",
         "client",
@@ -1881,7 +1949,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
         "source",
         "workspace",
         "api-key",
-        "provider",
+        "model-provider",
     )
     TOOL_REPORT_GROUPS = (
         "total",
@@ -1935,9 +2003,9 @@ class ServerReceiver(BaseHTTPRequestHandler):
 
     @staticmethod
     def reports_args(query: dict[str, list[str]]) -> argparse.Namespace:
-        group_by = query.get("group_by", ["client-model"])[0]
+        group_by = query.get("group_by", ["provider-source-model"])[0]
         if group_by not in ServerReceiver.REPORT_GROUPS:
-            group_by = "client-model"
+            group_by = "provider-source-model"
         try:
             limit = int(query.get("limit", ["100"])[0])
         except ValueError:
@@ -2003,13 +2071,6 @@ class ServerReceiver(BaseHTTPRequestHandler):
             return html.escape(str(value or ""))
 
         nav = server_nav("usage")
-        quick_links = """
-      <div class="quick-links">
-        <a href="/reports?group_by=workspace&source_kind=openrouter_broadcast">OpenRouter by workspace</a>
-        <a href="/reports?group_by=api-key&source_kind=openrouter_broadcast">OpenRouter by API key</a>
-        <a href="/reports?group_by=provider&source_kind=openrouter_broadcast">OpenRouter by provider</a>
-      </div>
-        """
         styles = server_page_styles()
         theme_script = server_theme_script()
         favicon = server_favicon_link()
@@ -2025,10 +2086,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
 <body>
   {nav}
 	  <main>
-	    <header>
-	      <h1>Usage Reports</h1>
-	      {quick_links}
-	    </header>
+	    <h1>Usage Reports</h1>
     <section class="summary">
       <div><div class="label">Events</div><div class="value">{format_cell("events", stats["usage_events"])}</div></div>
       <div><div class="label">Total tokens</div><div class="value">{format_cell("total_tokens", stats["total_tokens"])}</div></div>
@@ -2036,19 +2094,19 @@ class ServerReceiver(BaseHTTPRequestHandler):
 	      <div><div class="label">Output</div><div class="value">{format_cell("output_tokens", stats["output_tokens"])}</div></div>
 	      <div><div class="label">Cost</div><div class="value">{format_cell("cost_value", stats["cost_value"])} {html.escape(str(stats.get("cost_unit") or ""))}</div></div>
 	      <div><div class="label">Tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
-      <div><div class="label">Clients</div><div class="value">{format_cell("events", stats["configured_clients"])}</div></div>
+      <div><div class="label">Collectors</div><div class="value">{format_cell("events", stats["configured_clients"])}</div></div>
     </section>
     <form method="get" action="/reports" class="filters">
       <label>Group by <select name="group_by">{group_options}</select></label>
       <label>Since <input name="since" value="{field("since")}" placeholder="YYYY-MM-DD"></label>
       <label>Until <input name="until" value="{field("until")}" placeholder="YYYY-MM-DD"></label>
-	      <label>Client <input name="client_name" value="{field("client_name")}"></label>
+	      <label>Collector <input name="client_name" value="{field("client_name")}"></label>
 	      <label>Model <input name="model" value="{field("model")}"></label>
 	      <label>Session <input name="session_id" value="{field("session_id")}"></label>
-	      <label>Source <input name="source_kind" value="{field("source_kind")}"></label>
+	      <label>Source kind <input name="source_kind" value="{field("source_kind")}"></label>
 	      <label>Workspace <input name="workspace_label" value="{field("workspace_label")}"></label>
 	      <label>API key <input name="api_key_label" value="{field("api_key_label")}"></label>
-	      <label>Provider <input name="provider_name" value="{field("provider_name")}"></label>
+	      <label>Model provider <input name="provider_name" value="{field("provider_name")}"></label>
       <label>Limit <input name="limit" type="number" min="1" max="1000" value="{args.limit}"></label>
       <button type="submit">Apply</button>
     </form>
@@ -2133,7 +2191,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
     <header>
       <h1>Tool Reports</h1>
       <div class="quick-links">
-        <a href="/tools?group_by=client-tool">By client/tool</a>
+        <a href="/tools?group_by=client-tool">By collector/tool</a>
         <a href="/tools?group_by=day-tool">By day/tool</a>
         <a href="/tools?group_by=event&event_name=">Decisions and results</a>
       </div>
@@ -2150,7 +2208,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       <label>Group by <select name="group_by">{group_options}</select></label>
       <label>Since <input name="since" value="{field("since")}" placeholder="YYYY-MM-DD"></label>
       <label>Until <input name="until" value="{field("until")}" placeholder="YYYY-MM-DD"></label>
-      <label>Client <input name="client_name" value="{field("client_name")}"></label>
+      <label>Collector <input name="client_name" value="{field("client_name")}"></label>
       <label>Tool <input name="tool_name" value="{field("tool_name")}"></label>
       <label>Event <input name="event_name" value="{field("event_name")}"></label>
       <label>Session <input name="session_id" value="{field("session_id")}"></label>
@@ -2253,24 +2311,24 @@ class ServerReceiver(BaseHTTPRequestHandler):
 <body>
   {nav}
   <main>
-    <h1>AI Usage Tracker Admin</h1>
+    <h1>Collector Admin</h1>
     {message_block}
     {token_block}
     <section class="panel">
-      <h2>Create Client Token</h2>
+      <h2>Create Collector Token</h2>
       <form method="post" action="/admin/clients/create" class="filters">
-        <label>Client name <input name="client_name" required pattern="[A-Za-z0-9_.-]+"></label>
+        <label>Collector name <input name="client_name" required pattern="[A-Za-z0-9_.-]+"></label>
         <label>Display name <input name="display_name"></label>
         <button type="submit">Create token</button>
       </form>
     </section>
     <section class="panel">
-      <h2>Clients</h2>
+      <h2>Collectors</h2>
       <table>
         <thead>
-          <tr><th>Client</th><th>Display name</th><th>Status</th><th>Created</th><th>Updated</th><th>Last seen</th><th>Revoked</th><th>Actions</th></tr>
+          <tr><th>Collector</th><th>Display name</th><th>Status</th><th>Created</th><th>Updated</th><th>Last seen</th><th>Revoked</th><th>Actions</th></tr>
         </thead>
-        <tbody>{''.join(rows) or '<tr><td colspan="8">No clients yet.</td></tr>'}</tbody>
+        <tbody>{''.join(rows) or '<tr><td colspan="8">No collectors yet.</td></tr>'}</tbody>
       </table>
     </section>
   </main>
@@ -3412,8 +3470,43 @@ def server_tool_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
     return ("where " + " and ".join(clauses), params) if clauses else ("", params)
 
 
-def server_group_expressions(group_by: str) -> tuple[str, str, str, str, str, str, str, str, str]:
+def source_provider_expression(table: str = "usage_events") -> str:
+    return f"""
+        case
+          when {table}.client_name = '{OPENROUTER_BROADCAST_CLIENT}'
+            or {table}.source_kind = '{OPENROUTER_SOURCE_KIND}' then 'OpenRouter'
+          when lower(coalesce({table}.source_kind, '')) in ('claude-code', 'claude_code')
+            or {table}.event_name like 'claude_code.%' then 'Claude Code'
+          else 'Codex'
+        end
+    """
+
+
+def source_label_expression() -> str:
+    return f"""
+        case
+          when usage_events.client_name = '{OPENROUTER_BROADCAST_CLIENT}'
+            or usage_events.source_kind = '{OPENROUTER_SOURCE_KIND}'
+            then coalesce(
+              nullif(usage_events.workspace_label, ''),
+              nullif(usage_events.api_key_label, ''),
+              nullif(usage_events.provider_name, ''),
+              '(unknown)'
+            )
+          else coalesce(
+            nullif(usage_events.workspace_label, ''),
+            clients.display_name,
+            usage_events.client_name,
+            '(unknown)'
+          )
+        end
+    """
+
+
+def server_group_expressions(group_by: str) -> tuple[str, str, str, str, str, str, str, str, str, str, str]:
     period_expr = "''"
+    source_provider_expr = "''"
+    source_label_expr = "''"
     client_expr = "''"
     model_expr = "''"
     session_expr = "''"
@@ -3424,9 +3517,13 @@ def server_group_expressions(group_by: str) -> tuple[str, str, str, str, str, st
     cost_unit_expr = "coalesce(cost_unit, '')"
     if group_by in ("day", "day-model", "day-session", "day-client", "day-model-client"):
         period_expr = "substr(usage_events.source_received_at, 1, 10)"
+    if group_by in ("provider", "provider-source", "provider-source-model"):
+        source_provider_expr = source_provider_expression()
+    if group_by in ("provider-source", "provider-source-model"):
+        source_label_expr = source_label_expression()
     if group_by in ("client", "client-model", "day-client", "day-model-client"):
         client_expr = "coalesce(clients.display_name, usage_events.client_name, '(unknown)')"
-    if group_by in ("model", "client-model", "day-model", "day-model-client"):
+    if group_by in ("model", "client-model", "day-model", "day-model-client", "provider-source-model"):
         model_expr = "coalesce(model, '(unknown)')"
     if group_by in ("session", "day-session"):
         session_expr = "coalesce(session_id, '(unknown)')"
@@ -3436,9 +3533,21 @@ def server_group_expressions(group_by: str) -> tuple[str, str, str, str, str, st
         workspace_expr = "coalesce(workspace_label, '(unknown)')"
     if group_by == "api-key":
         api_key_expr = "coalesce(api_key_label, '(unknown)')"
-    if group_by == "provider":
+    if group_by == "model-provider":
         provider_expr = "coalesce(provider_name, '(unknown)')"
-    return period_expr, client_expr, model_expr, session_expr, source_expr, workspace_expr, api_key_expr, provider_expr, cost_unit_expr
+    return (
+        period_expr,
+        source_provider_expr,
+        source_label_expr,
+        client_expr,
+        model_expr,
+        session_expr,
+        source_expr,
+        workspace_expr,
+        api_key_expr,
+        provider_expr,
+        cost_unit_expr,
+    )
 
 
 def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, str]:
@@ -3463,6 +3572,8 @@ def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, st
 def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
     (
         period_expr,
+        source_provider_expr,
+        source_label_expr,
         client_expr,
         model_expr,
         session_expr,
@@ -3475,7 +3586,7 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
     cost_unit_grouped = args.group_by in COST_UNIT_REPORT_GROUPS
     cost_value_select = "coalesce(sum(usage_events.cost_value), 0)"
     cost_unit_select = cost_unit_expr
-    cost_group = "9"
+    cost_group = "11"
     if not cost_unit_grouped:
         cost_value_select = """
             case
@@ -3494,11 +3605,25 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
     order_by = "last_seen desc"
     if args.group_by.startswith("day"):
         order_by = "period desc, total_tokens desc"
-    elif args.group_by in ("model", "session", "client", "client-model", "source", "workspace", "api-key", "provider"):
+    elif args.group_by in (
+        "model",
+        "session",
+        "client",
+        "client-model",
+        "source",
+        "workspace",
+        "api-key",
+        "provider",
+        "provider-source",
+        "provider-source-model",
+        "model-provider",
+    ):
         order_by = "total_tokens desc"
     query = f"""
         select
             {period_expr} as period,
+            {source_provider_expr} as source_provider,
+            {source_label_expr} as source_label,
             {client_expr} as client_name,
             {model_expr} as model,
             {session_expr} as session_id,
@@ -3519,7 +3644,7 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
         from usage_events
         left join clients on clients.client_name = usage_events.client_name
         {where}
-        group by 1, 2, 3, 4, 5, 6, 7, 8, {cost_group}
+        group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, {cost_group}
         order by {order_by}
         limit ?
     """

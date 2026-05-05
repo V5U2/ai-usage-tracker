@@ -31,7 +31,7 @@ Import options:
    it is available from the default branch:
 
 ```text
-https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/unraid/ai-usage-tracker.xml
+https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/deploy/unraid/ai-usage-tracker.xml
 ```
 
 After the container starts, create collector client tokens at `/admin`, then

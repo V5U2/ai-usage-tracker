@@ -11,9 +11,9 @@ server can run directly with Python or through Docker Compose.
 Key entry points:
 
 - `codex_usage_observer.py`: compatibility CLI entry point
-- `codex_usage_tracker/core.py`: receiver, server, reporting, sync, and storage logic
-- `codex_usage_tracker/collector/`: local OTLP receiver, collector persistence, and forwarding surface
-- `codex_usage_tracker/aggregation_server/`: central ingestion, token admin, and reporting surface
+- `ai_usage_tracker/core.py`: receiver, server, reporting, sync, and storage logic
+- `ai_usage_tracker/collector/`: local OTLP receiver, collector persistence, and forwarding surface
+- `ai_usage_tracker/aggregation_server/`: central ingestion, token admin, and reporting surface
 - `test_codex_usage_observer.py`: unittest coverage
 - `Dockerfile`, `docker-compose.yml`, `docker/server.toml`: local central-server container setup
 
@@ -30,7 +30,7 @@ Key entry points:
   - `README.md`
   - `codex_usage_observer.example.toml`
   - `docker/server.toml`
-  - `unraid/ai-usage-tracker.xml`
+  - `deploy/unraid/ai-usage-tracker.xml`
   - launchd or Docker instructions in the README
 - For release-facing changes, also review whether updates are needed in changelog, release notes, migration notes, or version references if those files are later added.
 - Do not leave user-facing copy or docs knowingly inconsistent with implementation.

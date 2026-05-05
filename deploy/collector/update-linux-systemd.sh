@@ -17,8 +17,8 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 cp "$REPO_ROOT/codex_usage_observer.py" "$INSTALL_DIR/"
-rm -rf "$INSTALL_DIR/codex_usage_tracker"
-cp -R "$REPO_ROOT/codex_usage_tracker" "$INSTALL_DIR/"
+rm -rf "$INSTALL_DIR/codex_usage_tracker" "$INSTALL_DIR/ai_usage_tracker"
+cp -R "$REPO_ROOT/ai_usage_tracker" "$INSTALL_DIR/"
 
 systemctl --user restart "$SERVICE_NAME"
 

@@ -7,11 +7,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import codex_usage_observer as app
-import codex_usage_tracker.aggregation_server as aggregation_server
-import codex_usage_tracker.client as client_compat
-import codex_usage_tracker.collector as collector
-import codex_usage_tracker.core as core
-import codex_usage_tracker.server as server_compat
+import ai_usage_tracker.aggregation_server as aggregation_server
+import ai_usage_tracker.client as client_compat
+import ai_usage_tracker.collector as collector
+import ai_usage_tracker.core as core
+import ai_usage_tracker.server as server_compat
 
 
 def log_payload(attrs, body=None):
@@ -89,6 +89,42 @@ def observed_openrouter_trace_payload():
         {"key": "trace.metadata.openrouter.provider_slug", "value": {"stringValue": "chutes/int4"}},
     ]
     return payload
+
+
+def claude_code_metric_payload(points):
+    return {
+        "resourceMetrics": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": "claude-code"}},
+                        {"key": "session.id", "value": {"stringValue": "claude-session-1"}},
+                    ]
+                },
+                "scopeMetrics": [
+                    {
+                        "metrics": [
+                            {
+                                "name": name,
+                                "sum": {
+                                    "dataPoints": [
+                                        {
+                                            "asDouble" if isinstance(value, float) else "asInt": str(value),
+                                            "attributes": [
+                                                {"key": key, "value": {"stringValue": str(attr_value)}}
+                                                for key, attr_value in attrs.items()
+                                            ],
+                                        }
+                                    ]
+                                },
+                            }
+                            for name, value, attrs in points
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
 
 
 class ComponentLayoutTests(unittest.TestCase):
@@ -169,6 +205,35 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(event["api_key_label"], "prod-key")
         self.assertEqual(event["provider_name"], "Chutes")
 
+    def test_extracts_claude_code_token_and_cost_metrics(self):
+        payload = claude_code_metric_payload(
+            [
+                ("claude_code.token.usage", 9, {"type": "input", "model": "claude-opus-4-20250514"}),
+                ("claude_code.token.usage", 4, {"type": "output", "model": "claude-opus-4-20250514"}),
+                ("claude_code.token.usage", 3, {"type": "cacheRead", "model": "claude-opus-4-20250514"}),
+                ("claude_code.cost.usage", 0.012, {"model": "claude-opus-4-20250514"}),
+            ]
+        )
+
+        events = app.extract_usage("/v1/metrics", json.dumps(payload).encode())
+
+        self.assertEqual(len(events), 4)
+        by_name_and_type = {(event["event_name"], json.loads(event["attributes_json"]).get("type")): event for event in events}
+        input_event = by_name_and_type[("claude_code.token.usage", "input")]
+        output_event = by_name_and_type[("claude_code.token.usage", "output")]
+        cache_event = by_name_and_type[("claude_code.token.usage", "cacheRead")]
+        cost_event = by_name_and_type[("claude_code.cost.usage", None)]
+        self.assertEqual(input_event["model"], "claude-opus-4-20250514")
+        self.assertEqual(input_event["session_id"], "claude-session-1")
+        self.assertEqual(input_event["input_tokens"], 9)
+        self.assertEqual(input_event["total_tokens"], 9)
+        self.assertEqual(output_event["output_tokens"], 4)
+        self.assertEqual(output_event["total_tokens"], 4)
+        self.assertEqual(cache_event["cached_tokens"], 3)
+        self.assertEqual(cache_event["total_tokens"], 0)
+        self.assertEqual(cost_event["cost_value"], 0.012)
+        self.assertEqual(cost_event["cost_unit"], "USD")
+
     def test_redacts_account_metadata_but_keeps_token_counts(self):
         payload = log_payload(
             {
@@ -241,6 +306,27 @@ class ExtractionTests(unittest.TestCase):
         attrs = json.loads(events[0]["attributes_json"])
         self.assertNotIn("arguments", attrs)
         self.assertNotIn("output", attrs)
+
+    def test_extracts_claude_code_tool_events(self):
+        payload = log_payload(
+            {
+                "event.name": "tool_result",
+                "model": "claude-opus-4-20250514",
+                "tool_name": "Bash",
+                "tool_use_id": "toolu_1",
+                "success": "true",
+                "duration_ms": "125",
+            }
+        )
+
+        events = app.extract_tool_events("/v1/logs", json.dumps(payload).encode())
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_name"], "tool_result")
+        self.assertEqual(events[0]["model"], "claude-opus-4-20250514")
+        self.assertEqual(events[0]["tool_name"], "Bash")
+        self.assertEqual(events[0]["call_id"], "toolu_1")
+        self.assertEqual(events[0]["duration_ms"], 125)
 
     def test_raw_payload_body_is_disabled_by_default(self):
         config = app.AppConfig()
@@ -1363,9 +1449,17 @@ class ServerHttpTests(unittest.TestCase):
 
             self.assertIn("Usage Reports", body)
             self.assertSharedNav(body, "usage")
-            self.assertIn('<option value="client-model" selected>client-model</option>', body)
-            self.assertIn("/reports?group_by=workspace&source_kind=openrouter_broadcast", body)
-            self.assertIn("/reports?group_by=api-key&source_kind=openrouter_broadcast", body)
+            self.assertIn('<option value="provider-source-model" selected>provider-source-model</option>', body)
+            self.assertNotIn("OpenRouter by workspace", body)
+            self.assertNotIn("/reports?group_by=workspace&source_kind=openrouter_broadcast", body)
+            self.assertNotIn("/reports?group_by=api-key&source_kind=openrouter_broadcast", body)
+            self.assertNotIn("/reports?group_by=provider&source_kind=openrouter_broadcast", body)
+            self.assertIn("<th>provider</th>", body)
+            self.assertIn("<th>source</th>", body)
+            self.assertIn("<th>model</th>", body)
+            self.assertIn("Collector", body)
+            self.assertIn("Collectors", body)
+            self.assertIn("<td>Codex</td>", body)
             self.assertIn("<td>Laptop</td>", body)
             self.assertNotIn("<td>laptop</td>", body)
             self.assertIn("<td>gpt-test</td>", body)
@@ -1373,6 +1467,41 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn('data-utc="2026-05-04T01:02:03+00:00"', body)
             self.assertIn("formatBrowserTimes", body)
             con.close()
+
+    def test_server_default_usage_report_groups_by_provider_source_model(self):
+        body = json.dumps(openrouter_trace_payload()).encode()
+        config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.create_client_token(con, "laptop", "Laptop")
+            app.ingest_usage_events(
+                con,
+                "laptop",
+                [
+                    {
+                        "client_event_id": "codex-1",
+                        "received_at": "2026-05-04T01:02:03+00:00",
+                        "signal": "logs",
+                        "model": "gpt-test",
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                        "attributes_json": "{}",
+                    }
+                ],
+            )
+            self.assertEqual(app.ingest_openrouter_broadcast(con, body, config), (1, 0))
+            con.commit()
+
+            args = app.ServerReceiver.reports_args({})
+            rows = app.server_report_rows(con, args)
+            con.close()
+
+            self.assertEqual(args.group_by, "provider-source-model")
+            grouped = {(row["source_provider"], row["source_label"], row["model"]): row["total_tokens"] for row in rows}
+            self.assertEqual(grouped[("Codex", "Laptop", "gpt-test")], 15)
+            self.assertEqual(grouped[("OpenRouter", "agents", "openai/gpt-4o")], 17)
+            self.assertEqual(app.server_default_columns("provider-source-model")[:3], ("source_provider", "source_label", "model"))
 
     def test_server_reports_group_openrouter_by_workspace(self):
         body = json.dumps(openrouter_trace_payload()).encode()
@@ -1587,6 +1716,8 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn('<option value="client-tool" selected>client-tool</option>', body)
             self.assertIn("Grouped totals", body)
             self.assertIn("Recent tool calls", body)
+            self.assertIn("By collector/tool", body)
+            self.assertIn("<th>collector</th>", body)
             self.assertIn('class="status ok"', body)
             self.assertIn("<td>Laptop</td>", body)
             self.assertNotIn("<td>laptop</td>", body)
@@ -1655,6 +1786,9 @@ class ServerHttpTests(unittest.TestCase):
             token = app.create_client_token(con, "laptop", "Laptop")
             body = app.ServerReceiver.render_admin(object(), con, token=token)
             self.assertSharedNav(body, "admin")
+            self.assertIn("Collector Admin", body)
+            self.assertIn("Create Collector Token", body)
+            self.assertIn("Collector name", body)
             self.assertIn("New token, shown once", body)
             self.assertIn(token, body)
             self.assertIn('class="browser-time" data-utc=', body)

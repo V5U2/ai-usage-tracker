@@ -5,7 +5,7 @@ stores local SQLite rows, and optionally forwards compact events to an
 aggregation server.
 """
 
-from codex_usage_tracker.core import (  # noqa: F401
+from ai_usage_tracker.core import (  # noqa: F401
     AppConfig,
     DEFAULT_APP_CONFIG,
     DEFAULT_CONFIG,

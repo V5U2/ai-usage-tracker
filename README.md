@@ -1,15 +1,18 @@
-# Codex Usage Observer
+# AI Usage Tracker
 
-This is a local and multi-machine observability setup for Codex usage. It has
-two runtime roles:
+This is a local and multi-machine observability setup for AI usage. It tracks
+token, cost, model, provider, workspace, and tool-call activity from supported
+sources such as Codex OTEL telemetry and OpenRouter Broadcast traces. It has two
+runtime roles:
 
-- **Local collectors** run beside Codex on each machine. A collector receives
-  Codex OTEL/HTTP telemetry on `127.0.0.1:4318`, stores raw payloads and
-  extracted usage rows in a local SQLite database, and can forward compact
+- **Local collectors** run beside apps that emit OTEL/HTTP telemetry. A
+  collector receives telemetry on `127.0.0.1:4318`, stores raw payload metadata
+  and extracted usage rows in a local SQLite database, and can forward compact
   usage/tool events to an aggregation server.
 - **The aggregation server** runs once on a trusted host. It accepts compact
-  batches from collectors, stores multi-machine usage in a server SQLite
-  database, manages collector API tokens, and serves web reports.
+  batches from collectors plus optional provider webhooks such as OpenRouter
+  Broadcast, stores usage in a server SQLite database, manages collector API
+  tokens, and serves web reports.
 
 The collector is still useful without an aggregation server: local summaries,
 raw payload inspection, reindexing, and cleanup all work from the local SQLite
@@ -19,32 +22,35 @@ machines.
 Typical flow:
 
 ```text
-Codex OTEL -> local collector -> local SQLite
-                         |
-                         v
-                 aggregation server -> server SQLite -> /reports and /tools
+AI telemetry source -> local collector -> local SQLite
+                              |
+                              v
+                      aggregation server -> server SQLite -> /reports and /tools
+
+OpenRouter Broadcast --------------------^
 ```
 
 ## Repository layout
 
-- `codex_usage_tracker/collector/`: local OTLP receiver/collector surface,
+- `ai_usage_tracker/collector/`: local OTLP receiver/collector surface,
   including local persistence and forwarding to an aggregation server.
-- `codex_usage_tracker/aggregation_server/`: central aggregation server surface,
+- `ai_usage_tracker/aggregation_server/`: central aggregation server surface,
   including client tokens, ingestion APIs, and web reports.
-- `codex_usage_tracker/core.py`: shared implementation used by both components
+- `ai_usage_tracker/core.py`: shared implementation used by both components
   and the compatibility CLI.
-- `codex_usage_observer.py`: top-level compatibility CLI entry point.
+- `codex_usage_observer.py`: top-level compatibility CLI entry point. The file
+  name is retained for existing installs even though the project now tracks
+  broader AI usage.
 - `docker/`, `Dockerfile`, `docker-compose.yml`: containerized aggregation
   server setup.
-- `unraid/`: Unraid Docker template for deploying the aggregation server.
-- `deploy/`: deployment scripts for Unraid aggregation servers and macOS,
-  Linux, or WSL collectors.
+- `deploy/`: deployment scripts and templates for Unraid aggregation servers
+  and macOS, Linux, or WSL collectors.
 
 ## 1. Run a local collector
 
-Run this on every machine where you want to capture Codex usage. The collector
-binds to loopback by default and should generally stay local-only because OTEL
-payloads can include sensitive metadata.
+Run this on every machine where you want to capture local AI telemetry. The
+collector binds to loopback by default and should generally stay local-only
+because OTEL payloads can include sensitive metadata.
 
 ```bash
 python3 codex_usage_observer.py serve --port 4318
@@ -56,9 +62,9 @@ The explicit client command is equivalent:
 python3 codex_usage_observer.py client serve --port 4318
 ```
 
-Leave that process running while you use Codex. Use `--allow-remote` only on a
-trusted network and only when you intentionally want a collector to receive OTEL
-from another host.
+Leave that process running while you use a configured AI client. Use
+`--allow-remote` only on a trusted network and only when you intentionally want
+a collector to receive OTEL from another host.
 
 ### WSL/Linux autostart
 
@@ -92,9 +98,9 @@ automatically with the WSL user session:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/codex-usage-receiver.service <<'EOF'
+cat > ~/.config/systemd/user/ai-usage-receiver.service <<'EOF'
 [Unit]
-Description=Codex usage tracker local receiver
+Description=AI usage tracker local receiver
 After=network-online.target
 
 [Service]
@@ -109,16 +115,16 @@ WantedBy=default.target
 EOF
 
 systemctl --user daemon-reload
-systemctl --user enable --now codex-usage-receiver.service
+systemctl --user enable --now ai-usage-receiver.service
 ```
 
 Useful service commands:
 
 ```bash
-systemctl --user status codex-usage-receiver.service --no-pager
-journalctl --user -u codex-usage-receiver.service -f
-systemctl --user restart codex-usage-receiver.service
-systemctl --user disable --now codex-usage-receiver.service
+systemctl --user status ai-usage-receiver.service --no-pager
+journalctl --user -u ai-usage-receiver.service -f
+systemctl --user restart ai-usage-receiver.service
+systemctl --user disable --now ai-usage-receiver.service
 ```
 
 Check that it is listening:
@@ -173,12 +179,12 @@ Tagged releases also include a collector tarball,
 scripts. Extract it on a client and run the matching update script to upgrade
 without rewriting `codex_usage_observer.toml`.
 
-Codex does not start the receiver automatically. On macOS, install a user
-LaunchAgent if you want the receiver to start when you log in:
+AI clients generally do not start the receiver automatically. On macOS, install
+a user LaunchAgent if you want the receiver to start when you log in:
 
 ```bash
 mkdir -p "$HOME/Library/Application Support/ai-usage-tracker"
-cp -R codex_usage_observer.py codex_usage_tracker codex_usage_observer.toml \
+cp -R codex_usage_observer.py ai_usage_tracker codex_usage_observer.toml \
   "$HOME/Library/Application Support/ai-usage-tracker/"
 mkdir -p "$HOME/Library/Logs/ai-usage-tracker" "$HOME/Library/LaunchAgents"
 ```
@@ -244,7 +250,13 @@ launchctl bootout "gui/$(id -u)" \
   "$HOME/Library/LaunchAgents/com.example.ai-usage-tracker.receiver.plist"
 ```
 
-## 2. Configure Codex telemetry
+## 2. Configure telemetry sources
+
+The tracker is source-agnostic once it receives OTEL/HTTP JSON or normalized
+server-side usage events. Configure each AI provider or client to send telemetry
+to either a local collector or the aggregation server.
+
+### Codex OTEL telemetry
 
 Add this to `~/.codex/config.toml`:
 
@@ -263,10 +275,41 @@ The receiver also stores non-JSON payloads raw, but token extraction needs JSON.
 Codex batches telemetry asynchronously, so start a fresh Codex session after
 changing this config and check the observer again after the session has ended.
 
+### Claude Code OTEL telemetry
+
+Claude Code can use the same local collector when it exports OTLP/HTTP JSON.
+Enable the metrics exporter for token and cost usage, and the logs exporter for
+tool activity:
+
+```bash
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_METRICS_PROTOCOL=http/json
+export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://127.0.0.1:4318/v1/metrics
+export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:4318/v1/logs
+claude
+```
+
+For beta Claude Code traces, point the traces exporter at the same collector:
+
+```bash
+export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces
+```
+
+The collector normalizes `claude_code.token.usage` metrics with `type` values
+of `input`, `output`, `cacheRead`, and `cacheCreation`; it also stores
+`claude_code.cost.usage` as USD cost and recognizes Claude Code tool result and
+tool decision events.
+
 ## Aggregation server
 
 Run one aggregation server when you want multiple collectors to report into a
-single place. Collectors authenticate with per-client API tokens created from
+single place. Collectors authenticate with per-collector API tokens created from
 the server's admin UI. The server stores only token hashes, not the raw tokens.
 
 Start the aggregation server:
@@ -280,7 +323,10 @@ LAN; the MVP admin UI has no login and relies on network placement.
 
 Open `/admin` in a browser to create, rename, revoke, and delete revoked
 collector tokens. New tokens are shown once. Only token hashes are stored in the
-server SQLite DB.
+server SQLite DB. In the web UI, "collector" means the machine or ingestion
+process that reports usage to the aggregation server. Provider-side sources such
+as OpenRouter workspaces, projects, or API keys should be reported separately
+from collector identity.
 
 Configure each collector with the generated token:
 
@@ -315,9 +361,10 @@ python3 codex_usage_observer.py client sync-status --errors 5
 
 The server accepts compact usage and tool-event batches from collectors at
 `POST /api/v1/usage-events`. Open `/reports` in a browser to view token totals
-grouped by client and model by default, with filters for date, client, model,
-session, source, workspace, API key, provider, grouping, and row limit.
-Open `/tools` to view Codex tool calls grouped by client and tool. The web UI
+grouped by provider, provider-side source, and model by default, with filters
+for date, collector, model, session, source kind, workspace, API key, model
+provider, grouping, and row limit.
+Open `/tools` to view captured tool calls grouped by collector and tool. The web UI
 keeps UTC timestamps in the page data and displays them in the browser's local
 time zone. Report APIs are available at `GET /api/v1/reports/usage`,
 `GET /api/v1/reports/tools`, and `GET /api/v1/stats` using
@@ -372,15 +419,20 @@ secrets as report dimensions; OpenRouter API-key reporting uses non-secret label
 or IDs from the trace metadata when available. Secret-shaped attributes in
 `attributes_json` still follow the redaction rules.
 
-OpenRouter-focused report shortcuts are available on `/reports`, including:
+OpenRouter-focused report groupings are available through `/reports` query
+parameters and the report APIs, including:
 
 ```text
 /reports?group_by=workspace&source_kind=openrouter_broadcast
 /reports?group_by=api-key&source_kind=openrouter_broadcast
-/reports?group_by=provider&source_kind=openrouter_broadcast
+/reports?group_by=model-provider&source_kind=openrouter_broadcast
 ```
 
-The default `/reports` view remains `client-model` for collector compatibility.
+The default `/reports` view is `provider-source-model`. In that view, `provider`
+is the system where usage came from, such as Codex, Claude Code, or OpenRouter.
+`source` is the identity inside that provider: for collector-synced Codex usage
+it is normally the collector or workspace, while for OpenRouter it is the
+workspace first, then API key label if no workspace is available.
 
 Retained Broadcast payloads can be replayed after parser changes:
 
@@ -522,7 +574,7 @@ unless that release action is intended.
 
 ### Unraid deployment
 
-An Unraid Docker template is available at `unraid/ai-usage-tracker.xml`. It
+An Unraid Docker template is available at `deploy/unraid/ai-usage-tracker.xml`. It
 deploys the aggregation server from GHCR, maps host port `18418` to the
 container's `8318/tcp`, and persists server SQLite data plus `server.toml` at
 `/mnt/user/Docker/ai-usage-tracker`.
@@ -545,7 +597,7 @@ Or import it from the raw template URL after it is available on the default
 branch:
 
 ```text
-https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/unraid/ai-usage-tracker.xml
+https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/deploy/unraid/ai-usage-tracker.xml
 ```
 
 After starting the container, open `http://<unraid-ip>:18418/admin` to create
@@ -565,7 +617,7 @@ python3 codex_usage_observer.py report --group-by session --since 2026-05-01
 python3 codex_usage_observer.py report --group-by total --format csv
 ```
 
-To report Codex tool calls captured from OTEL:
+To report captured tool calls:
 
 ```bash
 python3 codex_usage_observer.py tools-report
@@ -579,7 +631,7 @@ To inspect extracted event attributes:
 python3 codex_usage_observer.py samples --limit 5
 ```
 
-To inspect raw telemetry received from Codex:
+To inspect raw telemetry received by the local collector:
 
 ```bash
 python3 codex_usage_observer.py stats
@@ -589,9 +641,10 @@ python3 codex_usage_observer.py dump-raw 1
 
 Raw payload bodies are not stored by default. If you temporarily set
 `raw_payload_body = true` for troubleshooting, raw OTEL payloads may include
-account metadata or prompt-related telemetry depending on your Codex
-configuration. Do not commit `codex_usage.sqlite*` files or share `dump-raw`
-output publicly. Extracted usage samples redact common credential and account fields.
+account metadata or prompt-related telemetry depending on your AI client or
+provider configuration. Do not commit `codex_usage.sqlite*` files or share
+`dump-raw` output publicly. Extracted usage samples redact common credential and
+account fields.
 If you change storage settings after collecting data, run `reindex` to rebuild
 extracted usage rows from stored raw payloads:
 
@@ -612,6 +665,9 @@ python3 codex_usage_observer.py --config codex_usage_observer.toml cleanup
 `report` supports these groupings:
 
 - `total`
+- `provider`
+- `provider-source`
+- `provider-source-model`
 - `day`
 - `model`
 - `session`
@@ -619,11 +675,14 @@ python3 codex_usage_observer.py --config codex_usage_observer.toml cleanup
 - `day-session`
 
 Server report APIs and the `/reports` web page also support `client`,
-`client-model`, `day-client`, and `day-model-client`.
+`client-model`, `day-client`, `day-model-client`, `source`, `workspace`,
+`api-key`, and `model-provider`. The `client*` group names are kept for API
+compatibility; the web UI labels them as collectors.
 
 `tools-report` supports `total`, `day`, `tool`, `session`, `event`,
 `day-tool`, and `day-session`. By default it reports completed
-`codex.tool_result` events; pass `--event-name ""` to include decisions too.
+`codex.tool_result` events when reporting Codex telemetry; pass
+`--event-name ""` to include decisions too.
 
 Filters use UTC timestamps. A plain date such as `2026-05-01` is accepted for
 `--since` and `--until`. CLI and API output keep server UTC timestamps; the web
@@ -632,15 +691,18 @@ are `table`, `csv`, and `json`.
 
 ## Limits
 
-This uses whatever Codex emits through OTEL. If your build does not emit token
-attributes, the receiver still stores the raw telemetry payloads, but the summary
-will show no extracted token events. In that case, inspect `samples` and the raw
-SQLite payloads, then add the emitted attribute names to `TOKEN_KEYS` in
-`codex_usage_observer.py`.
+This uses whatever each source emits through OTEL or provider webhooks. If a
+source does not emit recognized token attributes, the receiver still stores the
+raw telemetry payload metadata, but the summary will show no extracted token
+events. In that case, inspect `samples` and retained raw SQLite payloads, then
+add the emitted attribute names to the parser in `ai_usage_tracker/core.py`.
 
 The parser already recognises common OpenTelemetry/LLM usage names such as:
 
 - `input_tokens`, `prompt_tokens`, `gen_ai.usage.input_tokens`
 - `output_tokens`, `completion_tokens`, `gen_ai.usage.output_tokens`
 - `total_tokens`, `gen_ai.usage.total_tokens`
+- `claude_code.token.usage` metrics with `type` set to `input`, `output`,
+  `cacheRead`, or `cacheCreation`
+- `claude_code.cost.usage`
 - cached and reasoning token variants
