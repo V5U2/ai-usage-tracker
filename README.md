@@ -43,28 +43,6 @@ OpenRouter Broadcast --------------------^
 - `deploy/`: deployment scripts and templates for Unraid aggregation servers
   and macOS, Linux, or WSL collectors.
 
-## Breaking naming changes
-
-This release removes the old Codex-specific compatibility surface. Use
-`ai_usage_tracker.py`, `ai_usage_tracker.example.toml`, `AI_USAGE_*`
-environment variables, and `ai_usage*.sqlite` database names for new installs.
-The removed names are not auto-detected:
-
-- `codex_usage_observer.py`
-- `codex_usage_observer.example.toml`
-- `CODEX_USAGE_DB`, `CODEX_USAGE_SERVER_DB`, `CODEX_USAGE_CONFIG`, and
-  `CODEX_USAGE_MAX_BODY_BYTES`
-- `codex_usage.sqlite` and `codex_usage_server.sqlite`
-
-To keep existing data, rename or explicitly pass the old paths before
-upgrading. For example:
-
-```bash
-mv codex_usage.sqlite ai_usage.sqlite
-mv codex_usage_server.sqlite ai_usage_server.sqlite
-mv codex_usage_observer.toml ai_usage_tracker.toml
-```
-
 ## 1. Run a local collector
 
 Run this on every machine where you want to capture local AI telemetry. The
