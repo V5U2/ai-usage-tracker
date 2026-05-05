@@ -304,6 +304,90 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(event["cost_value"], 0)
         self.assertEqual(event["cost_unit"], "USD")
 
+    def test_backfill_missing_costs_estimates_existing_openai_rows(self):
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_openai_api_costs=True))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect(Path(tmp) / "usage.sqlite")
+            con.execute(
+                """
+                insert into raw_payloads(received_at, path, content_type, body)
+                values (?, ?, ?, X'')
+                """,
+                ("2026-05-04T01:02:03+00:00", "/v1/logs", "application/json"),
+            )
+            app.insert_usage(
+                con,
+                1,
+                "2026-05-04T01:02:03+00:00",
+                [
+                    {
+                        "signal": "logs",
+                        "event_name": "response.completed",
+                        "model": "gpt-5.4-mini",
+                        "session_id": None,
+                        "thread_id": None,
+                        "input_tokens": 1000000,
+                        "output_tokens": 100000,
+                        "total_tokens": 1100000,
+                        "cached_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "cost_value": 0,
+                        "cost_unit": None,
+                        "attributes_json": "{}",
+                    }
+                ],
+            )
+
+            updated = app.backfill_missing_costs(con, config)
+            row = con.execute("select cost_value, cost_unit from usage_events").fetchone()
+            con.close()
+
+        self.assertEqual(updated, 1)
+        self.assertAlmostEqual(row["cost_value"], 1.2)
+        self.assertEqual(row["cost_unit"], "USD")
+
+    def test_backfill_missing_costs_preserves_reported_zero_unit(self):
+        config = app.AppConfig(pricing=app.PricingConfig(estimate_openai_api_costs=True))
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect(Path(tmp) / "usage.sqlite")
+            con.execute(
+                """
+                insert into raw_payloads(received_at, path, content_type, body)
+                values (?, ?, ?, X'')
+                """,
+                ("2026-05-04T01:02:03+00:00", "/v1/logs", "application/json"),
+            )
+            app.insert_usage(
+                con,
+                1,
+                "2026-05-04T01:02:03+00:00",
+                [
+                    {
+                        "signal": "logs",
+                        "event_name": "response.completed",
+                        "model": "gpt-5.4-mini",
+                        "session_id": None,
+                        "thread_id": None,
+                        "input_tokens": 1000000,
+                        "output_tokens": 100000,
+                        "total_tokens": 1100000,
+                        "cached_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "cost_value": 0,
+                        "cost_unit": "USD",
+                        "attributes_json": "{}",
+                    }
+                ],
+            )
+
+            updated = app.backfill_missing_costs(con, config)
+            row = con.execute("select cost_value, cost_unit from usage_events").fetchone()
+            con.close()
+
+        self.assertEqual(updated, 0)
+        self.assertEqual(row["cost_value"], 0)
+        self.assertEqual(row["cost_unit"], "USD")
+
     def test_openai_api_cost_estimation_does_not_require_model_storage(self):
         config = app.AppConfig(
             storage=app.StorageConfig(model=False),
@@ -1428,6 +1512,63 @@ class ServerHttpTests(unittest.TestCase):
             self.assertAlmostEqual(rows[0]["cost_value"], 0.123)
             self.assertEqual(rows[0]["cost_unit"], "USD")
             self.assertEqual(rows[0]["attributes_json"], '{"updated": true}')
+
+    def test_collector_ingest_estimates_missing_cost_on_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            token = "unused"
+            body = json.dumps(
+                {
+                    "client_name": "laptop",
+                    "events": [
+                        {
+                            "client_event_id": "evt-1",
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "logs",
+                            "event_name": "response.completed",
+                            "model": "gpt-5.4-mini",
+                            "input_tokens": 1000000,
+                            "output_tokens": 100000,
+                            "total_tokens": 1100000,
+                            "cached_tokens": 0,
+                            "reasoning_tokens": 0,
+                            "cost_value": 0,
+                            "attributes_json": "{}",
+                        }
+                    ],
+                }
+            ).encode()
+            handler = object.__new__(app.ServerReceiver)
+            handler.db_path = db
+            handler.app_config = app.AppConfig(pricing=app.PricingConfig(estimate_openai_api_costs=True))
+            handler.path = "/api/v1/usage-events"
+            handler.headers = {
+                "content-length": str(len(body)),
+                "content-type": "application/json",
+                "authorization": f"Bearer {token}",
+            }
+            handler.rfile = io.BytesIO(body)
+            handler.wfile = io.BytesIO()
+            responses = []
+            handler.send_response = responses.append
+            handler.send_header = lambda _key, _value: None
+            handler.end_headers = lambda: None
+
+            con = app.connect_server(db)
+            token = app.create_client_token(con, "laptop", "Laptop")
+            con.commit()
+            con.close()
+
+            handler.headers["authorization"] = f"Bearer {token}"
+            handler.do_POST()
+
+            con = app.connect_server(db)
+            row = con.execute("select cost_value, cost_unit from usage_events").fetchone()
+            con.close()
+
+            self.assertEqual(responses, [200])
+            self.assertAlmostEqual(row["cost_value"], 1.2)
+            self.assertEqual(row["cost_unit"], "USD")
 
     def test_openrouter_broadcast_ingest_auth_dedupe_and_fields(self):
         body = json.dumps(openrouter_trace_payload()).encode()

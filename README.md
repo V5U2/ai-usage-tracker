@@ -783,6 +783,13 @@ run:
 python3 ai_usage_tracker.py --config ai_usage_tracker.toml cleanup
 ```
 
+If pricing was enabled after data was already collected, backfill missing
+estimated costs from the stored model and token columns:
+
+```bash
+python3 ai_usage_tracker.py --config ai_usage_tracker.toml backfill-costs
+```
+
 ## Reports
 
 `report` supports these groupings:
@@ -837,3 +844,20 @@ When `[pricing].estimate_openai_api_costs = true` or
 `[pricing].estimate_claude_api_costs = true`, known OpenAI API and Claude
 model names without provider-reported costs also get estimated USD cost values
 from embedded API pricing tables.
+
+The aggregation server also applies those estimates when older collectors send
+usage rows without costs. To fix rows already stored on the server, run:
+
+```bash
+python3 ai_usage_tracker.py --config server.toml server backfill-costs --server-db ai_usage_server.sqlite
+```
+
+For Docker deployments, run the same command inside the container with the
+mounted config and database paths, for example:
+
+```bash
+docker exec ai-usage-tracker python ai_usage_tracker.py \
+  --config /data/server.toml \
+  server backfill-costs \
+  --server-db /data/ai_usage_server.sqlite
+```

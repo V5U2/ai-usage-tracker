@@ -1031,6 +1031,82 @@ def estimate_claude_api_cost(
     ) / 1_000_000
 
 
+def stored_event_attrs(attributes_json: str | None) -> dict[str, Any]:
+    if not attributes_json:
+        return {}
+    try:
+        loaded = json.loads(attributes_json)
+    except json.JSONDecodeError:
+        return {}
+    return flatten_attrs(loaded) if isinstance(loaded, dict) else {}
+
+
+def should_estimate_missing_cost(cost_value: Any, cost_unit: Any) -> bool:
+    if cost_unit not in (None, ""):
+        return False
+    try:
+        return float(cost_value or 0) == 0
+    except (TypeError, ValueError):
+        return True
+
+
+def estimate_api_cost_for_event(event: dict[str, Any] | sqlite3.Row, config: AppConfig) -> tuple[float, str | None]:
+    model = event["model"] if isinstance(event, sqlite3.Row) else event.get("model")
+    input_tokens = int(event["input_tokens"] if isinstance(event, sqlite3.Row) else event.get("input_tokens") or 0)
+    output_tokens = int(event["output_tokens"] if isinstance(event, sqlite3.Row) else event.get("output_tokens") or 0)
+    cached_tokens = int(event["cached_tokens"] if isinstance(event, sqlite3.Row) else event.get("cached_tokens") or 0)
+    reasoning_tokens = int(
+        event["reasoning_tokens"] if isinstance(event, sqlite3.Row) else event.get("reasoning_tokens") or 0
+    )
+
+    if config.pricing.estimate_openai_api_costs:
+        cost = estimate_openai_api_cost(
+            model,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            reasoning_tokens,
+            config,
+        )
+        if cost:
+            return cost, "USD"
+
+    if config.pricing.estimate_claude_api_costs:
+        attrs = stored_event_attrs(event["attributes_json"] if isinstance(event, sqlite3.Row) else event.get("attributes_json"))
+        cache_read_tokens = int_attr(
+            attrs,
+            ("cache_read_tokens", "cache_read_input_tokens", "usage.cache_read_input_tokens"),
+        )
+        cache_creation_tokens = int_attr(
+            attrs,
+            ("cache_creation_tokens", "cache_creation_input_tokens", "usage.cache_creation_input_tokens"),
+        )
+        if cached_tokens and not cache_read_tokens and not cache_creation_tokens:
+            cache_read_tokens = cached_tokens
+        cost = estimate_claude_api_cost(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        )
+        if cost:
+            return cost, "USD"
+
+    return 0.0, None
+
+
+def apply_missing_cost_estimate(event: dict[str, Any], config: AppConfig) -> dict[str, Any]:
+    if not should_estimate_missing_cost(event.get("cost_value"), event.get("cost_unit")):
+        return event
+    cost_value, cost_unit = estimate_api_cost_for_event(event, config)
+    if cost_unit:
+        event = dict(event)
+        event["cost_value"] = cost_value
+        event["cost_unit"] = cost_unit
+    return event
+
+
 def has_token_signal(attrs: dict[str, Any]) -> bool:
     keys = set(attrs)
     return any(any(alias in keys for alias in aliases) for aliases in TOKEN_KEYS.values())
@@ -2668,7 +2744,13 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 if not isinstance(tool_events, list):
                     self.send_json(400, {"error": "tool_events must be a list"})
                     return
-                accepted, duplicates = ingest_usage_events(con, client_name, events, update_existing=True)
+                accepted, duplicates = ingest_usage_events(
+                    con,
+                    client_name,
+                    events,
+                    update_existing=True,
+                    config=self.app_config,
+                )
                 accepted_tool_events, duplicate_tool_events = ingest_tool_events(con, client_name, tool_events)
                 con.commit()
                 self.send_json(
@@ -3505,6 +3587,7 @@ def ingest_openrouter_broadcast(
         OPENROUTER_BROADCAST_CLIENT,
         normalize_openrouter_broadcast(body, config),
         update_existing=update_existing,
+        config=config,
     )
 
 
@@ -3581,11 +3664,13 @@ def ingest_usage_events(
     events: Sequence[dict[str, Any]],
     *,
     update_existing: bool = False,
+    config: AppConfig = DEFAULT_APP_CONFIG,
 ) -> tuple[int, int]:
     accepted = 0
     duplicates = 0
     received_at = now_iso()
-    for event in events:
+    for raw_event in events:
+        event = apply_missing_cost_estimate(raw_event, config)
         try:
             con.execute(
                 """
@@ -3722,6 +3807,30 @@ def ingest_tool_events(con: sqlite3.Connection, client_name: str, events: Sequen
     if events:
         con.execute("update clients set last_seen_at = ?, updated_at = ? where client_name = ?", (received_at, received_at, client_name))
     return accepted, duplicates
+
+
+def backfill_missing_costs(con: sqlite3.Connection, config: AppConfig) -> int:
+    rows = con.execute(
+        """
+        select id, model, input_tokens, output_tokens, cached_tokens, reasoning_tokens, cost_value, cost_unit,
+               attributes_json
+        from usage_events
+        where coalesce(cost_value, 0) = 0
+          and nullif(cost_unit, '') is null
+        order by id
+        """
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        cost_value, cost_unit = estimate_api_cost_for_event(row, config)
+        if not cost_unit:
+            continue
+        con.execute(
+            "update usage_events set cost_value = ?, cost_unit = ? where id = ?",
+            (cost_value, cost_unit, row["id"]),
+        )
+        updated += 1
+    return updated
 
 
 def server_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
@@ -4122,6 +4231,20 @@ def replay_broadcast(args: argparse.Namespace) -> None:
         con.close()
 
 
+def backfill_costs(args: argparse.Namespace) -> None:
+    config = load_config(Path(args.config))
+    is_server = getattr(args, "server_cmd", None) == "backfill-costs"
+    db_path = Path(getattr(args, "server_db", None) or (config.central.db if is_server else args.db))
+    connector = connect_server if is_server else connect
+    con = connector(db_path)
+    try:
+        updated = backfill_missing_costs(con, config)
+        con.commit()
+        print(f"Backfilled estimated costs for {updated} usage events.")
+    finally:
+        con.close()
+
+
 def cleanup(args: argparse.Namespace) -> None:
     con = connect(Path(args.db))
     config = load_config(Path(args.config))
@@ -4279,6 +4402,13 @@ def main() -> int:
     p_cleanup = sub.add_parser("cleanup", parents=[db_parent], help="Apply current storage config to existing data")
     p_cleanup.set_defaults(func=cleanup)
 
+    p_backfill_costs = sub.add_parser(
+        "backfill-costs",
+        parents=[db_parent],
+        help="Estimate missing costs for existing usage rows when pricing is enabled",
+    )
+    p_backfill_costs.set_defaults(func=backfill_costs)
+
     p_samples = sub.add_parser("samples", parents=[db_parent])
     p_samples.add_argument("--limit", type=int, default=10)
     p_samples.set_defaults(func=samples)
@@ -4317,6 +4447,9 @@ def main() -> int:
     p_client_sync_status.add_argument("--errors", type=int, default=0, help="Show this many pending sync error groups")
     p_client_sync_status.set_defaults(func=sync_status)
 
+    p_client_backfill_costs = client_sub.add_parser("backfill-costs", parents=[db_parent])
+    p_client_backfill_costs.set_defaults(func=backfill_costs)
+
     p_client_version = client_sub.add_parser("version")
     p_client_version.set_defaults(func=version)
 
@@ -4338,6 +4471,10 @@ def main() -> int:
     p_server_replay.add_argument("--limit", type=int)
     p_server_replay.add_argument("--format", choices=("table", "json"), default="table")
     p_server_replay.set_defaults(func=replay_broadcast)
+
+    p_server_backfill_costs = server_sub.add_parser("backfill-costs", parents=[db_parent])
+    p_server_backfill_costs.add_argument("--server-db")
+    p_server_backfill_costs.set_defaults(func=backfill_costs)
 
     p_server_version = server_sub.add_parser("version")
     p_server_version.set_defaults(func=version)
