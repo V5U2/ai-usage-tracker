@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterable, Sequence, TextIO
+from typing import Any, Iterable, Mapping, Sequence, TextIO
 from urllib import error as urlerror
 from urllib import parse, request
 
@@ -1723,6 +1723,18 @@ def server_html_cell(column: str, value: Any, *, classes: str = "") -> str:
     return f"<td{class_attr}>{html.escape(format_cell(column, value))}</td>"
 
 
+def format_cost_summary(stats: Mapping[str, Any]) -> str:
+    cost_totals = stats.get("cost_totals") or []
+    if cost_totals:
+        parts = []
+        for row in cost_totals:
+            value = format_cell("cost_value", row.get("cost_value"))
+            unit = str(row.get("cost_unit") or "")
+            parts.append(f"{value} {unit}".strip())
+        return " + ".join(parts)
+    return f'{format_cell("cost_value", stats.get("cost_value"))} {str(stats.get("cost_unit") or "")}'.strip()
+
+
 def default_columns(group_by: str) -> tuple[str, ...]:
     if group_by == "total":
         return (
@@ -2394,7 +2406,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       <div><div class="label">Total tokens</div><div class="value">{format_cell("total_tokens", stats["total_tokens"])}</div></div>
 	      <div><div class="label">Input</div><div class="value">{format_cell("input_tokens", stats["input_tokens"])}</div></div>
 	      <div><div class="label">Output</div><div class="value">{format_cell("output_tokens", stats["output_tokens"])}</div></div>
-	      <div><div class="label">Cost</div><div class="value">{format_cell("cost_value", stats["cost_value"])} {html.escape(str(stats.get("cost_unit") or ""))}</div></div>
+	      <div><div class="label">Cost</div><div class="value">{html.escape(format_cost_summary(stats))}</div></div>
 	      <div><div class="label">Tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
       <div><div class="label">Collectors</div><div class="value">{format_cell("events", stats["configured_clients"])}</div></div>
     </section>
@@ -4206,9 +4218,24 @@ def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
         from usage_events
         """
     ).fetchone()
+    cost_totals = [
+        dict(row)
+        for row in con.execute(
+            f"""
+            select
+                {nonzero_cost_unit_expr} as cost_unit,
+                coalesce(sum(cost_value), 0) as cost_value
+            from usage_events
+            where {nonzero_cost_unit_expr} is not null
+            group by 1
+            order by case when {nonzero_cost_unit_expr} = 'USD' then 0 else 1 end, 1
+            """
+        ).fetchall()
+    ]
     clients = con.execute("select count(*) from clients where revoked_at is null").fetchone()[0]
     tool_events = con.execute("select count(*) from tool_events").fetchone()[0]
     out = dict(totals)
+    out["cost_totals"] = cost_totals
     out["configured_clients"] = clients
     out["tool_events"] = tool_events
     return out

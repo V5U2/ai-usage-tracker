@@ -820,7 +820,9 @@ are `table`, `csv`, and `json`.
 
 Report cost totals are grouped by the visible report dimensions. Rows with no
 cost or zero cost do not split otherwise matching groups, and a group only shows
-`mixed` when it contains nonzero costs in more than one unit.
+`mixed` when it contains nonzero costs in more than one unit. The web dashboard
+summary renders mixed-unit totals as a per-unit breakdown, such as
+`12.34 USD + 0.05 credits`, because those values are not additive.
 
 ## Limits
 

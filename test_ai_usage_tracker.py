@@ -2085,6 +2085,45 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIsNone(rows[0]["cost_value"])
             self.assertEqual(rows[0]["cost_unit"], "mixed")
 
+    def test_reports_page_shows_cost_breakdown_for_mixed_units(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            for event_id, cost_value, cost_unit in (
+                ("api-cost", 2.5, "USD"),
+                ("openrouter-cost", 0.125, "credits"),
+            ):
+                app.ingest_usage_events(
+                    con,
+                    "client-a",
+                    [
+                        {
+                            "client_event_id": event_id,
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "traces",
+                            "model": "gpt-test",
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2,
+                            "cost_value": cost_value,
+                            "cost_unit": cost_unit,
+                            "attributes_json": "{}",
+                        }
+                    ],
+                )
+            con.commit()
+
+            stats = app.server_stats_dict(con)
+            body = app.ServerReceiver.render_reports(object(), con, {})
+            con.close()
+
+            self.assertEqual(stats["cost_unit"], "mixed")
+            self.assertEqual(
+                stats["cost_totals"],
+                [{"cost_unit": "USD", "cost_value": 2.5}, {"cost_unit": "credits", "cost_value": 0.125}],
+            )
+            self.assertIn('<div class="label">Cost</div><div class="value">2.5 USD + 0.125 credits</div>', body)
+            self.assertNotIn('<div class="label">Cost</div><div class="value"> mixed</div>', body)
+
     def test_server_reports_do_not_split_hidden_cost_units(self):
         with tempfile.TemporaryDirectory() as tmp:
             con = app.connect_server(Path(tmp) / "server.sqlite")
