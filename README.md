@@ -460,6 +460,13 @@ manual retry with:
 python3 ai_usage_tracker.py client sync
 ```
 
+After enabling cost estimation or updating parser/reporting behavior, force a
+full resend to let the aggregation server refresh duplicate historical rows:
+
+```bash
+python3 ai_usage_tracker.py client sync --all
+```
+
 Check collector sync progress with:
 
 ```bash

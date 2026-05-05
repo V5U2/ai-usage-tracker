@@ -3109,6 +3109,24 @@ def pending_tool_sync_rows(con: sqlite3.Connection, config: AppConfig, limit: in
     ).fetchall()
 
 
+def mark_all_for_resync(con: sqlite3.Connection, config: AppConfig) -> int:
+    target_key = sync_server_key(config)
+    total = 0
+    for table_name in ("usage_events", "tool_events"):
+        cursor = con.execute(
+            f"""
+            update {table_name}
+            set synced_at = null,
+                synced_server_key = null,
+                last_sync_error = null
+            where synced_server_key = ?
+            """,
+            (target_key,),
+        )
+        total += cursor.rowcount
+    return total
+
+
 def post_usage_batch(
     config: AppConfig,
     rows: Sequence[sqlite3.Row],
@@ -3236,6 +3254,7 @@ def sync(args: argparse.Namespace) -> None:
     config = load_config(Path(args.config))
     con = connect(Path(args.db))
     try:
+        marked = mark_all_for_resync(con, config) if getattr(args, "all", False) else 0
         if args.limit:
             attempted, synced, error = sync_pending_usage(con, config, limit=args.limit)
         else:
@@ -3246,6 +3265,8 @@ def sync(args: argparse.Namespace) -> None:
     if error:
         print(f"Sync failed for {attempted} events: {error}", file=sys.stderr)
         raise SystemExit(1)
+    if marked:
+        print(f"Marked {marked} previously synced events for resync.")
     print(f"Synced {synced} events.")
 
 
@@ -4269,6 +4290,7 @@ def main() -> int:
         "sync", parents=[db_parent], help="Forward queued client usage events to the aggregation server"
     )
     p_sync.add_argument("--limit", type=int)
+    p_sync.add_argument("--all", action="store_true", help="Resend rows already synced to the current server target")
     p_sync.set_defaults(func=sync)
 
     p_sync_status = sub.add_parser("sync-status", parents=[db_parent], help="Show collector sync progress")
@@ -4287,6 +4309,7 @@ def main() -> int:
 
     p_client_sync = client_sub.add_parser("sync", parents=[db_parent])
     p_client_sync.add_argument("--limit", type=int)
+    p_client_sync.add_argument("--all", action="store_true", help="Resend rows already synced to the current server target")
     p_client_sync.set_defaults(func=sync)
 
     p_client_sync_status = client_sub.add_parser("sync-status", parents=[db_parent])

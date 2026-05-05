@@ -1025,6 +1025,35 @@ class ClientSyncTests(unittest.TestCase):
             self.assertEqual(row["synced_server_key"], app.sync_server_key(second))
             con.close()
 
+    def test_mark_all_for_resync_makes_current_target_pending_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "usage.sqlite"
+            con = app.connect(db)
+            self.insert_sync_event(con)
+            self.insert_sync_tool_event(con)
+            config = app.AppConfig(
+                server=app.RemoteServerConfig(endpoint="http://server", api_key="secret")
+            )
+
+            with patch.object(
+                core,
+                "post_usage_batch",
+                return_value={
+                    "accepted": 1,
+                    "duplicates": 0,
+                    "accepted_tool_events": 1,
+                    "duplicate_tool_events": 0,
+                },
+            ):
+                self.assertEqual(app.sync_pending_usage(con, config), (2, 2, None))
+
+            self.assertEqual(app.pending_sync_rows(con, config, 10), [])
+            self.assertEqual(app.pending_tool_sync_rows(con, config, 10), [])
+            self.assertEqual(app.mark_all_for_resync(con, config), 2)
+            self.assertEqual(len(app.pending_sync_rows(con, config, 10)), 1)
+            self.assertEqual(len(app.pending_tool_sync_rows(con, config, 10)), 1)
+            con.close()
+
     def test_sync_all_drains_multiple_batches(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "usage.sqlite"
