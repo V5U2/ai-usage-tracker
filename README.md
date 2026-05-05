@@ -10,12 +10,15 @@ It has two runtime roles:
 - **Collector**: runs beside AI clients, receives OTEL/HTTP payloads on
   `127.0.0.1:4318`, stores local SQLite history, extracts usage rows, and can
   forward compact events to a server.
-- **Aggregation server**: runs once on a trusted host, accepts collector sync
-  batches and optional provider webhooks, stores a server SQLite database,
+- **Aggregation server**: optional; runs once on a trusted host when you want
+  shared multi-machine reporting or direct provider ingest. It accepts collector
+  sync batches and optional provider webhooks, stores a server SQLite database,
   manages collector API tokens, and serves web reports.
 
-The collector works on its own. Add the aggregation server when you want shared
-reports across machines or direct provider ingest such as OpenRouter Broadcast.
+The collector works on its own. You do not need an aggregation server for local
+capture, local SQLite history, summaries, reports, samples, reindexing, cleanup,
+or cost backfills. Add the aggregation server only when you want shared reports
+across machines or direct provider ingest such as OpenRouter Broadcast.
 
 ## Architecture
 
@@ -116,7 +119,7 @@ For autostart and update scripts:
 - macOS launchd: [deploy/collector/README.md#macos-collector](deploy/collector/README.md#macos-collector)
 - WSL2: use the Linux path when systemd is enabled.
 
-### 2. Install The Aggregation Server
+### 2. Optional: Install The Aggregation Server
 
 Run one server when multiple collectors should report into a shared view:
 
