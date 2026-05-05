@@ -48,9 +48,8 @@ jobs:
           cp -R ai_usage_tracker "${package_dir}/ai_usage_tracker"
           mkdir -p "${package_dir}/deploy"
           cp -R deploy/collector "${package_dir}/deploy/collector"
+          cp -R deploy/aggregation-server "${package_dir}/deploy/aggregation-server"
           cp deploy/README.md "${package_dir}/deploy/README.md"
-          mkdir -p "${package_dir}/deploy/aggregation-server"
-          cp deploy/aggregation-server/README.md "${package_dir}/deploy/aggregation-server/README.md"
 
           tar -C dist -czf "dist/${archive}" "ai-usage-tracker-collector-${tag}"
           echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
