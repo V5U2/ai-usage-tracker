@@ -8,12 +8,12 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-import codex_usage_observer as app
+import ai_usage_tracker as app
 import ai_usage_tracker.aggregation_server as aggregation_server
-import ai_usage_tracker.client as client_compat
+import ai_usage_tracker.client as client_module
 import ai_usage_tracker.collector as collector
 import ai_usage_tracker.core as core
-import ai_usage_tracker.server as server_compat
+import ai_usage_tracker.server as server_module
 
 
 def log_payload(attrs, body=None):
@@ -138,9 +138,9 @@ class ComponentLayoutTests(unittest.TestCase):
         self.assertIs(aggregation_server.server_serve, core.server_serve)
         self.assertIs(aggregation_server.server_report_rows, core.server_report_rows)
 
-    def test_legacy_component_modules_remain_compatible(self):
-        self.assertIs(client_compat.Receiver, collector.Receiver)
-        self.assertIs(server_compat.ServerReceiver, aggregation_server.ServerReceiver)
+    def test_component_alias_modules_expose_expected_surfaces(self):
+        self.assertIs(client_module.Receiver, collector.Receiver)
+        self.assertIs(server_module.ServerReceiver, aggregation_server.ServerReceiver)
 
     def test_version_commands_print_package_version(self):
         for argv in (
@@ -154,22 +154,10 @@ class ComponentLayoutTests(unittest.TestCase):
                     self.assertEqual(app.main(), 0)
                 self.assertEqual(out.getvalue().strip(), f"ai-usage-tracker {app.APP_VERSION}")
 
-    def test_default_path_prefers_generic_names_and_keeps_legacy_fallback(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
-            cwd = Path.cwd()
-            try:
-                os.chdir(tmp)
-                self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("ai.sqlite"))
-                Path("codex.sqlite").write_text("")
-                self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("codex.sqlite"))
-            finally:
-                os.chdir(cwd)
-
-        with patch.dict(os.environ, {"CODEX_USAGE_DB": "legacy.sqlite"}, clear=True):
-            self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("legacy.sqlite"))
-
-        with patch.dict(os.environ, {"AI_USAGE_DB": "generic.sqlite", "CODEX_USAGE_DB": "legacy.sqlite"}, clear=True):
-            self.assertEqual(core.default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai.sqlite", "codex.sqlite"), Path("generic.sqlite"))
+    def test_default_paths_use_generic_ai_usage_names(self):
+        self.assertEqual(core.DEFAULT_DB, Path(os.environ.get("AI_USAGE_DB", "ai_usage.sqlite")))
+        self.assertEqual(core.DEFAULT_SERVER_DB, Path(os.environ.get("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite")))
+        self.assertEqual(core.DEFAULT_CONFIG, Path(os.environ.get("AI_USAGE_CONFIG", "ai_usage_tracker.toml")))
 
 
 class ExtractionTests(unittest.TestCase):
@@ -1694,7 +1682,7 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("<th>model</th>", body)
             self.assertIn("Collector", body)
             self.assertIn("Collectors", body)
-            self.assertIn("<td>Codex</td>", body)
+            self.assertIn("<td>Local OTEL</td>", body)
             self.assertIn("<td>Laptop</td>", body)
             self.assertNotIn("<td>laptop</td>", body)
             self.assertIn("<td>gpt-test</td>", body)
@@ -1714,7 +1702,7 @@ class ServerHttpTests(unittest.TestCase):
                 "laptop",
                 [
                     {
-                        "client_event_id": "codex-1",
+                        "client_event_id": "ai-1",
                         "received_at": "2026-05-04T01:02:03+00:00",
                         "signal": "logs",
                         "model": "gpt-test",
@@ -1734,7 +1722,7 @@ class ServerHttpTests(unittest.TestCase):
 
             self.assertEqual(args.group_by, "provider-source-model")
             grouped = {(row["source_provider"], row["source_label"], row["model"]): row["total_tokens"] for row in rows}
-            self.assertEqual(grouped[("Codex", "Laptop", "gpt-test")], 15)
+            self.assertEqual(grouped[("Local OTEL", "Laptop", "gpt-test")], 15)
             self.assertEqual(grouped[("OpenRouter", "agents", "openai/gpt-4o")], 17)
             self.assertEqual(app.server_default_columns("provider-source-model")[:3], ("source_provider", "source_label", "model"))
 
@@ -1963,7 +1951,7 @@ class ServerHttpTests(unittest.TestCase):
             con.close()
 
     def test_tool_reports_can_include_decisions_and_results(self):
-        args = app.ServerReceiver.tool_reports_args({"event_name": [""], "group_by": ["event"]})
+        args = app.ServerReceiver.tool_reports_args({"group_by": ["event"]})
 
         self.assertEqual(args.event_name, "")
         self.assertEqual(args.group_by, "event")

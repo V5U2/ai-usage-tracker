@@ -35,11 +35,11 @@ enabled = false
 retain_payload_body = true
 
 [pricing]
-# Estimate missing OpenAI API costs from token counts for known OpenAI/Codex
-# model names, and missing Claude API costs from token counts for known Claude
-# model names. Provider-reported costs always take precedence. Rates are
-# embedded from the public OpenAI and Claude API pricing docs and should be
-# reviewed when providers change pricing.
+# Estimate missing OpenAI API costs from token counts for known OpenAI model
+# names, and missing Claude API costs from token counts for known Claude model
+# names. Provider-reported costs always take precedence. Rates are embedded
+# from the public OpenAI and Claude API pricing docs and should be reviewed
+# when providers change pricing.
 estimate_openai_api_costs = false
 estimate_claude_api_costs = false
 # Reasoning tokens are billed as output tokens by OpenAI API models. Leave this

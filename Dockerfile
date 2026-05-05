@@ -6,7 +6,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY ai_usage_tracker.py codex_usage_observer.py /app/
+COPY ai_usage_tracker.py /app/
 COPY ai_usage_tracker /app/ai_usage_tracker
 COPY docker/server.toml /app/default-server.toml
 COPY docker/entrypoint.sh /app/entrypoint.sh

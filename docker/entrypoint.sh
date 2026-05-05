@@ -11,11 +11,7 @@ if [ ! -f "$CONFIG_PATH" ]; then
 fi
 
 if [ -z "$SERVER_DB" ]; then
-  if [ -f /data/codex_usage_server.sqlite ] && [ ! -f /data/ai_usage_server.sqlite ]; then
-    SERVER_DB=/data/codex_usage_server.sqlite
-  else
-    SERVER_DB=/data/ai_usage_server.sqlite
-  fi
+  SERVER_DB=/data/ai_usage_server.sqlite
 fi
 
 exec python ai_usage_tracker.py \

@@ -149,10 +149,8 @@ The release workflow publishes a collector tarball named
 It contains:
 
 - `ai_usage_tracker.py`
-- `codex_usage_observer.py` compatibility wrapper
 - `ai_usage_tracker/`
 - `ai_usage_tracker.example.toml`
-- `codex_usage_observer.example.toml` legacy compatibility example
 - `deploy/collector/`
 - `README.md` and `deploy/README.md`
 

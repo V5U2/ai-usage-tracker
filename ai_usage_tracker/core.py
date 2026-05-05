@@ -36,34 +36,10 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
 APP_VERSION = "0.4.0"
 
 
-def default_path(primary_env: str, legacy_env: str, default_name: str, legacy_name: str) -> Path:
-    if os.environ.get(primary_env):
-        return Path(os.environ[primary_env])
-    if os.environ.get(legacy_env):
-        return Path(os.environ[legacy_env])
-    default_path = Path(default_name)
-    legacy_path = Path(legacy_name)
-    if legacy_path.exists() and not default_path.exists():
-        return legacy_path
-    return default_path
-
-
-DEFAULT_DB = default_path("AI_USAGE_DB", "CODEX_USAGE_DB", "ai_usage.sqlite", "codex_usage.sqlite")
-DEFAULT_SERVER_DB = default_path(
-    "AI_USAGE_SERVER_DB",
-    "CODEX_USAGE_SERVER_DB",
-    "ai_usage_server.sqlite",
-    "codex_usage_server.sqlite",
-)
-DEFAULT_CONFIG = default_path(
-    "AI_USAGE_CONFIG",
-    "CODEX_USAGE_CONFIG",
-    "ai_usage_tracker.toml",
-    "codex_usage_observer.toml",
-)
-DEFAULT_MAX_BODY_BYTES = int(
-    os.environ.get("AI_USAGE_MAX_BODY_BYTES", os.environ.get("CODEX_USAGE_MAX_BODY_BYTES", str(50 * 1024 * 1024)))
-)
+DEFAULT_DB = Path(os.environ.get("AI_USAGE_DB", "ai_usage.sqlite"))
+DEFAULT_SERVER_DB = Path(os.environ.get("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite"))
+DEFAULT_CONFIG = Path(os.environ.get("AI_USAGE_CONFIG", "ai_usage_tracker.toml"))
+DEFAULT_MAX_BODY_BYTES = int(os.environ.get("AI_USAGE_MAX_BODY_BYTES", str(50 * 1024 * 1024)))
 SENSITIVE_ATTR_KEYS = {
     "authorization",
     "cookie",
@@ -2259,7 +2235,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
             tool_name=query.get("tool_name", [None])[0] or None,
             session_id=query.get("session_id", [None])[0] or None,
             client_name=query.get("client_name", [None])[0] or None,
-            event_name=query.get("event_name", ["codex.tool_result"])[0],
+            event_name=query.get("event_name", [""])[0],
             limit=limit,
         )
 
@@ -3671,7 +3647,7 @@ def ingest_tool_events(con: sqlite3.Connection, client_name: str, events: Sequen
                     received_at,
                     str(event.get("received_at") or received_at),
                     str(event.get("signal") or "logs"),
-                    str(event.get("event_name") or "codex.tool_result"),
+                    str(event.get("event_name") or "tool_result"),
                     event.get("model"),
                     event.get("session_id"),
                     event.get("thread_id"),
@@ -3761,7 +3737,9 @@ def source_provider_expression(table: str = "usage_events") -> str:
             or {table}.source_kind = '{OPENROUTER_SOURCE_KIND}' then 'OpenRouter'
           when lower(coalesce({table}.source_kind, '')) in ('claude-code', 'claude_code')
             or {table}.event_name like 'claude_code.%' then 'Claude Code'
-          else 'Codex'
+          when lower(coalesce({table}.source_kind, '')) in ('codex', 'openai-codex')
+            or {table}.event_name like 'codex.%' then 'Codex'
+          else 'Local OTEL'
         end
     """
 
@@ -4209,7 +4187,7 @@ def main() -> int:
         choices=("total", "day", "tool", "session", "event", "day-tool", "day-session"),
         default="tool",
     )
-    p_tools_report.add_argument("--event-name", default="codex.tool_result", help="Tool event type to include")
+    p_tools_report.add_argument("--event-name", default="", help="Only include one tool event type")
     p_tools_report.add_argument("--tool-name", help="Only include one tool")
     add_report_filters(p_tools_report)
     add_report_output(p_tools_report)
