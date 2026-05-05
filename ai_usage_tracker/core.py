@@ -1915,9 +1915,10 @@ def server_default_columns(group_by: str) -> tuple[str, ...]:
 
 def server_tool_default_columns(group_by: str) -> tuple[str, ...]:
     if group_by == "client":
-        return ("client_name", "tool_events", "successes", "failures", "total_duration_ms", "last_seen")
+        return ("source_provider", "client_name", "tool_events", "successes", "failures", "total_duration_ms", "last_seen")
     if group_by == "client-tool":
         return (
+            "source_provider",
             "client_name",
             "tool_name",
             "tool_events",
@@ -1928,10 +1929,19 @@ def server_tool_default_columns(group_by: str) -> tuple[str, ...]:
             "last_seen",
         )
     if group_by == "day-client":
-        return ("period", "client_name", "tool_events", "successes", "failures", "total_duration_ms")
+        return ("period", "source_provider", "client_name", "tool_events", "successes", "failures", "total_duration_ms")
     if group_by == "day-tool-client":
-        return ("period", "client_name", "tool_name", "tool_events", "successes", "failures", "total_duration_ms")
-    return tool_default_columns(group_by)
+        return (
+            "period",
+            "source_provider",
+            "client_name",
+            "tool_name",
+            "tool_events",
+            "successes",
+            "failures",
+            "total_duration_ms",
+        )
+    return ("source_provider", *tool_default_columns(group_by))
 
 
 def print_compact_rows(rows: Sequence[sqlite3.Row], columns: Sequence[str]) -> None:
@@ -3987,8 +3997,9 @@ def nonzero_cost_unit_expression(prefix: str = "") -> str:
     )
 
 
-def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, str]:
+def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, str, str]:
     period_expr = "''"
+    source_provider_expr = tool_source_provider_expression()
     client_expr = "''"
     tool_expr = "''"
     session_expr = "''"
@@ -4003,7 +4014,7 @@ def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, st
         session_expr = "coalesce(session_id, '(unknown)')"
     if group_by == "event":
         event_expr = "event_name"
-    return period_expr, client_expr, tool_expr, session_expr, event_expr
+    return period_expr, source_provider_expr, client_expr, tool_expr, session_expr, event_expr
 
 
 def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
@@ -4090,7 +4101,9 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
 
 
 def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
-    period_expr, client_expr, tool_expr, session_expr, event_expr = server_tool_group_expressions(args.group_by)
+    period_expr, source_provider_expr, client_expr, tool_expr, session_expr, event_expr = server_tool_group_expressions(
+        args.group_by
+    )
     where, params = server_tool_where_clause(args)
     order_by = "last_seen desc"
     if args.group_by.startswith("day"):
@@ -4100,6 +4113,7 @@ def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -
     query = f"""
         select
             {period_expr} as period,
+            {source_provider_expr} as source_provider,
             {client_expr} as client_name,
             {tool_expr} as tool_name,
             {session_expr} as session_id,
@@ -4114,7 +4128,7 @@ def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -
         from tool_events
         left join clients on clients.client_name = tool_events.client_name
         {where}
-        group by 1, 2, 3, 4, 5
+        group by 1, 2, 3, 4, 5, 6
         order by {order_by}
         limit ?
     """

@@ -2337,7 +2337,9 @@ class ServerHttpTests(unittest.TestCase):
                 con,
                 {},
             )
-            recent_rows = app.server_tool_recent_rows(con, app.ServerReceiver.tool_reports_args({}))
+            args = app.ServerReceiver.tool_reports_args({})
+            grouped_rows = app.server_tool_report_rows(con, args)
+            recent_rows = app.server_tool_recent_rows(con, args)
 
             self.assertIn("Tool Reports", body)
             self.assertSharedNav(body, "tools")
@@ -2357,6 +2359,8 @@ class ServerHttpTests(unittest.TestCase):
             self.assertNotIn("session-1", body)
             self.assertNotIn("call-1", body)
             self.assertIn('data-utc="2026-05-04T01:02:03+00:00"', body)
+            self.assertEqual(len(grouped_rows), 1)
+            self.assertEqual(grouped_rows[0]["source_provider"], "Codex")
             self.assertEqual(len(recent_rows), 1)
             self.assertEqual(recent_rows[0]["source_received_at"], "2026-05-04T01:02:03+00:00")
             self.assertEqual(recent_rows[0]["source_provider"], "Codex")
