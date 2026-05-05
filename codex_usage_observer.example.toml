@@ -26,10 +26,11 @@ db = "codex_usage_server.sqlite"
 # Authorization: Bearer <api_key>
 enabled = false
 # api_key = "change-me"
-# Optional extra exact-match header, useful when OpenRouter sends Cloudflare
-# Access service-token headers through Broadcast custom headers.
-# required_header_name = "CF-Access-Client-Id"
-# required_header_value = "your.cloudflare.access.client.id"
+# Optional extra exact-match header for a custom header that reaches the origin.
+# Do not use this for Cloudflare Access service-token headers; Cloudflare
+# consumes those at the edge.
+# required_header_name = "X-OpenRouter-Broadcast-Secret"
+# required_header_value = "change-me-too"
 # Retain Broadcast OTLP bodies for `server replay-broadcast`.
 retain_payload_body = true
 

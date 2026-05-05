@@ -283,8 +283,8 @@ admin_api_key = "admin"
 [openrouter_broadcast]
 enabled = true
 api_key = "orb_secret"
-required_header_name = "CF-Access-Client-Id"
-required_header_value = "cf-client"
+required_header_name = "X-OpenRouter-Broadcast-Secret"
+required_header_value = "extra-secret"
 retain_payload_body = true
 """,
                 encoding="utf-8",
@@ -294,8 +294,8 @@ retain_payload_body = true
 
             self.assertTrue(config.openrouter_broadcast.enabled)
             self.assertEqual(config.openrouter_broadcast.api_key, "orb_secret")
-            self.assertEqual(config.openrouter_broadcast.required_header_name, "CF-Access-Client-Id")
-            self.assertEqual(config.openrouter_broadcast.required_header_value, "cf-client")
+            self.assertEqual(config.openrouter_broadcast.required_header_name, "X-OpenRouter-Broadcast-Secret")
+            self.assertEqual(config.openrouter_broadcast.required_header_value, "extra-secret")
             self.assertTrue(config.openrouter_broadcast.retain_payload_body)
 
     def test_load_config_keeps_legacy_server_section_aliases(self):
@@ -1046,8 +1046,8 @@ class ServerHttpTests(unittest.TestCase):
                 openrouter_broadcast=app.OpenRouterBroadcastConfig(
                     enabled=True,
                     api_key="orb_secret",
-                    required_header_name="CF-Access-Client-Id",
-                    required_header_value="cf-client",
+                    required_header_name="X-OpenRouter-Broadcast-Secret",
+                    required_header_value="extra-secret",
                 )
             )
             handler.path = "/v1/traces"
@@ -1068,7 +1068,7 @@ class ServerHttpTests(unittest.TestCase):
                 "content-length": str(len(body)),
                 "content-type": "application/json",
                 "authorization": "Bearer orb_secret",
-                "CF-Access-Client-Id": "cf-client",
+                "X-OpenRouter-Broadcast-Secret": "extra-secret",
             }
             handler.rfile = io.BytesIO(body)
             handler.wfile = io.BytesIO()

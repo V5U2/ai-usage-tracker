@@ -336,9 +336,11 @@ Enable the machine-ingest path in the server config:
 [openrouter_broadcast]
 enabled = true
 api_key = "change-me"
-# Optional exact-match pass-through header check.
-# required_header_name = "CF-Access-Client-Id"
-# required_header_value = "your.cloudflare.access.client.id"
+# Optional exact-match check for a custom header that reaches the origin.
+# Do not use this for Cloudflare Access service-token headers; Cloudflare
+# consumes those at the edge and does not pass them through reliably.
+# required_header_name = "X-OpenRouter-Broadcast-Secret"
+# required_header_value = "change-me-too"
 retain_payload_body = true
 ```
 
@@ -360,8 +362,9 @@ Use custom headers:
 ```
 
 The `Authorization` header is validated by this app. Cloudflare Access headers
-only get the request through Cloudflare unless you also configure
-`required_header_name` and `required_header_value`.
+only get the request through Cloudflare; do not configure app-level validation
+against `CF-Access-Client-Id` or `CF-Access-Client-Secret` because Cloudflare
+does not pass those service-token headers through to the origin reliably.
 
 For privacy, enable OpenRouter Broadcast Privacy Mode when you only need usage,
 cost, model, provider, timing, and metadata. The server never stores raw bearer
