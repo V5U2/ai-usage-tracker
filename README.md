@@ -143,6 +143,8 @@ Open the admin UI to create collector API tokens:
 http://127.0.0.1:8318/admin
 ```
 
+![Aggregation server collector admin](docs/assets/aggregation-server-admin.png)
+
 New tokens are shown once. The server stores token hashes, not raw tokens. Add a
 generated token to each collector:
 
