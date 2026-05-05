@@ -41,7 +41,8 @@ OpenRouter Broadcast --------------------^
 - `docker/`, `Dockerfile`, `docker-compose.yml`: containerized aggregation
   server setup.
 - `deploy/`: deployment scripts and templates for Unraid aggregation servers
-  and macOS, Linux, or WSL collectors.
+  and macOS or Linux collectors. WSL2 uses the Linux collector path when
+  systemd is enabled.
 
 ## 1. Run a local collector
 
@@ -63,7 +64,7 @@ Leave that process running while you use a configured AI client. Use
 `--allow-remote` only on a trusted network and only when you intentionally want
 a collector to receive OTEL from another host.
 
-### WSL/Linux autostart
+### Linux autostart
 
 For a script-driven install, use
 `deploy/collector/install-linux-systemd.sh`. It copies the collector into
@@ -90,38 +91,17 @@ Tagged releases also include a collector tarball,
 scripts. Extract it on a client and run the matching update script to upgrade
 without rewriting `ai_usage_tracker.toml`.
 
-On WSL with systemd enabled, run the receiver as a user service so it starts
-automatically with the WSL user session:
-
-```bash
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/ai-usage-receiver.service <<'EOF'
-[Unit]
-Description=AI usage tracker local receiver
-After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/your-user/ai-usage-tracker
-ExecStart=/usr/bin/python3 /home/your-user/ai-usage-tracker/ai_usage_tracker.py --config /home/your-user/ai-usage-tracker/ai_usage_tracker.toml client serve --host 127.0.0.1 --port 4318
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-EOF
-
-systemctl --user daemon-reload
-systemctl --user enable --now ai-usage-receiver.service
-```
+WSL2 can use the same Linux systemd installer when systemd is enabled in the
+distribution. If systemd is disabled, start the collector manually from the WSL2
+session or enable systemd first.
 
 Useful service commands:
 
 ```bash
-systemctl --user status ai-usage-receiver.service --no-pager
-journalctl --user -u ai-usage-receiver.service -f
-systemctl --user restart ai-usage-receiver.service
-systemctl --user disable --now ai-usage-receiver.service
+systemctl --user status ai-usage-collector.service --no-pager
+journalctl --user -u ai-usage-collector.service -f
+systemctl --user restart ai-usage-collector.service
+systemctl --user disable --now ai-usage-collector.service
 ```
 
 Check that it is listening:

@@ -3,8 +3,9 @@
 This directory contains deployment helpers for the two runtime roles:
 
 - **Aggregation server**: runs once, commonly as a Docker container on Unraid.
-- **Collector**: runs beside AI clients on each Mac, Linux, or WSL machine and
-  forwards compact events to the aggregation server.
+- **Collector**: runs beside AI clients on each Mac or Linux machine and
+  forwards compact events to the aggregation server. WSL2 uses the Linux path
+  when systemd is enabled.
 
 ## Unraid Aggregation Server
 
@@ -39,9 +40,9 @@ http://UNRAID_HOST_OR_IP:18418/admin
 Create a collector client token. The raw token is shown once; use it when
 installing collectors.
 
-## Linux or WSL Collector
+## Linux Collector
 
-Run this on the Linux or WSL machine where an AI client runs:
+Run this on the Linux machine where an AI client runs:
 
 ```bash
 AGGREGATION_ENDPOINT=http://UNRAID_HOST_OR_IP:18418 \
@@ -49,6 +50,10 @@ COLLECTOR_API_KEY=ait_generated_token_from_admin_ui \
 CLIENT_NAME="$(hostname)" \
 deploy/collector/install-linux-systemd.sh
 ```
+
+WSL2 can use the same installer when systemd is enabled in the distribution. If
+systemd is disabled, use the manual collector command from the main README or
+enable systemd first.
 
 For a Cloudflare Access-protected endpoint, add:
 
@@ -79,7 +84,7 @@ python3 ~/.local/share/ai-usage-tracker/ai_usage_tracker.py \
   client sync-status
 ```
 
-Update an already-installed Linux or WSL collector without changing its config:
+Update an already-installed Linux collector without changing its config:
 
 ```bash
 deploy/collector/update-linux-systemd.sh
@@ -160,7 +165,7 @@ script from the extracted directory. The update scripts preserve the existing
 collector config and credentials:
 
 ```bash
-# Linux or WSL
+# Linux
 deploy/collector/update-linux-systemd.sh
 
 # macOS
