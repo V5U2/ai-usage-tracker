@@ -312,6 +312,7 @@ class PricingConfig:
     estimate_openai_api_costs: bool = False
     estimate_claude_api_costs: bool = False
     include_reasoning_tokens_as_output: bool = True
+    report_openrouter_credits_as_usd: bool = False
 
 
 @dataclass(frozen=True)
@@ -519,6 +520,7 @@ def load_config(path: Path | None) -> AppConfig:
         estimate_openai_api_costs=bool_config(pricing_data, "estimate_openai_api_costs", False),
         estimate_claude_api_costs=bool_config(pricing_data, "estimate_claude_api_costs", False),
         include_reasoning_tokens_as_output=bool_config(pricing_data, "include_reasoning_tokens_as_output", True),
+        report_openrouter_credits_as_usd=bool_config(pricing_data, "report_openrouter_credits_as_usd", False),
     )
     return AppConfig(
         client_name=str_config(data, "client_name", "local"),
@@ -2362,8 +2364,9 @@ class ServerReceiver(BaseHTTPRequestHandler):
 
     def render_reports(self, con: sqlite3.Connection, query: dict[str, list[str]]) -> str:
         args = ServerReceiver.reports_args(query)
-        stats = server_stats_dict(con)
-        rows = server_report_rows(con, args)
+        app_config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
+        stats = server_stats_dict(con, app_config)
+        rows = server_report_rows(con, args, app_config)
         columns = server_default_columns(args.group_by)
 
         group_options = "\n".join(
@@ -2673,14 +2676,14 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 if not require_admin(self.app_config, self.headers):
                     self.send_json(401, {"error": "admin authorization required"})
                     return
-                self.send_json(200, server_stats_dict(con))
+                self.send_json(200, server_stats_dict(con, self.app_config))
                 return
             if parsed.path == "/api/v1/reports/usage":
                 if not require_admin(self.app_config, self.headers):
                     self.send_json(401, {"error": "admin authorization required"})
                     return
                 args = self.reports_args(query)
-                rows = [dict(row) for row in server_report_rows(con, args)]
+                rows = [dict(row) for row in server_report_rows(con, args, self.app_config)]
                 self.send_json(200, {"rows": rows})
                 return
             if parsed.path == "/api/v1/reports/tools":
@@ -4000,11 +4003,24 @@ def server_group_expressions(group_by: str) -> tuple[str, str, str, str, str, st
     )
 
 
-def nonzero_cost_unit_expression(prefix: str = "") -> str:
+def report_cost_unit_expression(prefix: str = "", config: AppConfig = DEFAULT_APP_CONFIG) -> str:
+    cost_unit = f"nullif({prefix}cost_unit, '')"
+    if not config.pricing.report_openrouter_credits_as_usd:
+        return f"coalesce({cost_unit}, '(unknown)')"
+    return (
+        "case "
+        f"when {prefix}source_kind = '{OPENROUTER_SOURCE_KIND}' "
+        f"and lower(coalesce({cost_unit}, '')) = 'credits' then 'USD' "
+        f"else coalesce({cost_unit}, '(unknown)') "
+        "end"
+    )
+
+
+def nonzero_cost_unit_expression(prefix: str = "", config: AppConfig = DEFAULT_APP_CONFIG) -> str:
     return (
         "case "
         f"when coalesce({prefix}cost_value, 0) != 0 "
-        f"then coalesce(nullif({prefix}cost_unit, ''), '(unknown)') "
+        f"then {report_cost_unit_expression(prefix, config)} "
         "end"
     )
 
@@ -4029,7 +4045,11 @@ def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, st
     return period_expr, source_provider_expr, client_expr, tool_expr, session_expr, event_expr
 
 
-def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
+def server_report_rows(
+    con: sqlite3.Connection,
+    args: argparse.Namespace,
+    config: AppConfig = DEFAULT_APP_CONFIG,
+) -> list[sqlite3.Row]:
     (
         period_expr,
         source_provider_expr,
@@ -4048,7 +4068,7 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
     cost_unit_select = cost_unit_expr
     cost_group = "11"
     if not cost_unit_grouped:
-        nonzero_cost_unit_expr = nonzero_cost_unit_expression("usage_events.")
+        nonzero_cost_unit_expr = nonzero_cost_unit_expression("usage_events.", config)
         cost_value_select = """
             case
               when count(distinct {nonzero_cost_unit_expr}) <= 1 then coalesce(sum(usage_events.cost_value), 0)
@@ -4193,8 +4213,8 @@ def server_tool_summary(con: sqlite3.Connection, args: argparse.Namespace) -> sq
     return con.execute(query, params).fetchone()
 
 
-def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
-    nonzero_cost_unit_expr = nonzero_cost_unit_expression()
+def server_stats_dict(con: sqlite3.Connection, config: AppConfig = DEFAULT_APP_CONFIG) -> dict[str, Any]:
+    nonzero_cost_unit_expr = nonzero_cost_unit_expression("", config)
     totals = con.execute(
         f"""
         select

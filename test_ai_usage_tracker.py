@@ -740,6 +740,7 @@ retain_payload_body = true
 estimate_openai_api_costs = true
 estimate_claude_api_costs = true
 include_reasoning_tokens_as_output = false
+report_openrouter_credits_as_usd = true
 """,
                 encoding="utf-8",
             )
@@ -749,6 +750,7 @@ include_reasoning_tokens_as_output = false
             self.assertTrue(config.pricing.estimate_openai_api_costs)
             self.assertTrue(config.pricing.estimate_claude_api_costs)
             self.assertFalse(config.pricing.include_reasoning_tokens_as_output)
+            self.assertTrue(config.pricing.report_openrouter_credits_as_usd)
 
     def test_load_config_keeps_legacy_server_section_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2123,6 +2125,63 @@ class ServerHttpTests(unittest.TestCase):
             )
             self.assertIn('<div class="label">Cost</div><div class="value">2.5 USD + 0.125 credits</div>', body)
             self.assertNotIn('<div class="label">Cost</div><div class="value"> mixed</div>', body)
+
+    def test_server_can_report_openrouter_credits_as_usd_without_rewriting_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            for event_id, cost_value, cost_unit, source_kind in (
+                ("api-cost", 2.5, "USD", "logs"),
+                ("openrouter-cost", 0.125, "credits", "openrouter_broadcast"),
+            ):
+                app.ingest_usage_events(
+                    con,
+                    "client-a",
+                    [
+                        {
+                            "client_event_id": event_id,
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "traces",
+                            "model": "gpt-test",
+                            "source_kind": source_kind,
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2,
+                            "cost_value": cost_value,
+                            "cost_unit": cost_unit,
+                            "attributes_json": "{}",
+                        }
+                    ],
+                )
+            con.commit()
+            args = argparse.Namespace(
+                group_by="total",
+                since=None,
+                until=None,
+                model=None,
+                session_id=None,
+                client_name=None,
+                source_kind=None,
+                workspace_label=None,
+                api_key_label=None,
+                provider_name=None,
+                limit=100,
+            )
+            config = app.AppConfig(pricing=app.PricingConfig(report_openrouter_credits_as_usd=True))
+
+            rows = app.server_report_rows(con, args, config)
+            stats = app.server_stats_dict(con, config)
+            stored = con.execute(
+                "select cost_value, cost_unit from usage_events where client_event_id = 'openrouter-cost'"
+            ).fetchone()
+            con.close()
+
+            self.assertEqual(len(rows), 1)
+            self.assertAlmostEqual(rows[0]["cost_value"], 2.625)
+            self.assertEqual(rows[0]["cost_unit"], "USD")
+            self.assertAlmostEqual(stats["cost_value"], 2.625)
+            self.assertEqual(stats["cost_unit"], "USD")
+            self.assertEqual(stats["cost_totals"], [{"cost_unit": "USD", "cost_value": 2.625}])
+            self.assertEqual(stored["cost_unit"], "credits")
 
     def test_server_reports_do_not_split_hidden_cost_units(self):
         with tempfile.TemporaryDirectory() as tmp:
