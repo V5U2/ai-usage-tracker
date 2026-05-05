@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/V5U2/ai-usage-tracker/compare/v0.4.1...v0.4.2) (2026-05-05)
+
+
+### Bug Fixes
+
+* label Claude Code local OTEL tool usage ([8a8214c](https://github.com/V5U2/ai-usage-tracker/commit/8a8214c57a6ba6c34c348d4c0e613325389fc60c))
+
 ## [0.4.1](https://github.com/V5U2/ai-usage-tracker/compare/v0.4.0...v0.4.1) (2026-05-05)
 
 
