@@ -155,9 +155,24 @@ class ComponentLayoutTests(unittest.TestCase):
                 self.assertEqual(out.getvalue().strip(), f"ai-usage-tracker {app.APP_VERSION}")
 
     def test_default_paths_use_generic_ai_usage_names(self):
-        self.assertEqual(core.DEFAULT_DB, Path(os.environ.get("AI_USAGE_DB", "ai_usage.sqlite")))
-        self.assertEqual(core.DEFAULT_SERVER_DB, Path(os.environ.get("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite")))
-        self.assertEqual(core.DEFAULT_CONFIG, Path(os.environ.get("AI_USAGE_CONFIG", "ai_usage_tracker.toml")))
+        self.assertEqual(core.DEFAULT_DB, Path(os.environ.get("AI_USAGE_DB") or "ai_usage.sqlite"))
+        self.assertEqual(core.DEFAULT_SERVER_DB, Path(os.environ.get("AI_USAGE_SERVER_DB") or "ai_usage_server.sqlite"))
+        self.assertEqual(core.DEFAULT_CONFIG, Path(os.environ.get("AI_USAGE_CONFIG") or "ai_usage_tracker.toml"))
+
+    def test_blank_env_values_fall_back_to_generic_defaults(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AI_USAGE_DB": "",
+                "AI_USAGE_SERVER_DB": "",
+                "AI_USAGE_CONFIG": "",
+                "AI_USAGE_MAX_BODY_BYTES": "",
+            },
+        ):
+            self.assertEqual(core.env_value("AI_USAGE_DB", "ai_usage.sqlite"), "ai_usage.sqlite")
+            self.assertEqual(core.env_value("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite"), "ai_usage_server.sqlite")
+            self.assertEqual(core.env_value("AI_USAGE_CONFIG", "ai_usage_tracker.toml"), "ai_usage_tracker.toml")
+            self.assertEqual(core.env_value("AI_USAGE_MAX_BODY_BYTES", "52428800"), "52428800")
 
 
 class ExtractionTests(unittest.TestCase):

@@ -36,10 +36,14 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
 APP_VERSION = "0.4.0"
 
 
-DEFAULT_DB = Path(os.environ.get("AI_USAGE_DB", "ai_usage.sqlite"))
-DEFAULT_SERVER_DB = Path(os.environ.get("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite"))
-DEFAULT_CONFIG = Path(os.environ.get("AI_USAGE_CONFIG", "ai_usage_tracker.toml"))
-DEFAULT_MAX_BODY_BYTES = int(os.environ.get("AI_USAGE_MAX_BODY_BYTES", str(50 * 1024 * 1024)))
+def env_value(name: str, default: str) -> str:
+    return os.environ.get(name) or default
+
+
+DEFAULT_DB = Path(env_value("AI_USAGE_DB", "ai_usage.sqlite"))
+DEFAULT_SERVER_DB = Path(env_value("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite"))
+DEFAULT_CONFIG = Path(env_value("AI_USAGE_CONFIG", "ai_usage_tracker.toml"))
+DEFAULT_MAX_BODY_BYTES = int(env_value("AI_USAGE_MAX_BODY_BYTES", str(50 * 1024 * 1024)))
 SENSITIVE_ATTR_KEYS = {
     "authorization",
     "cookie",
