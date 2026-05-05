@@ -15,6 +15,9 @@ enabled = false
 retain_payload_body = true
 
 [pricing]
+estimate_openai_api_costs = true
+estimate_claude_api_costs = true
+include_reasoning_tokens_as_output = true
 # Reporting-only: treat OpenRouter Broadcast costs stored as credits as USD in
 # reports and dashboard summaries. Stored rows keep the original credits unit.
 report_openrouter_credits_as_usd = false

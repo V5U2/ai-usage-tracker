@@ -953,49 +953,66 @@ def model_name_variants(model: str | None) -> tuple[str, ...]:
     if not normalized:
         return ()
     variants = [normalized]
-    dotted_parts = normalized.split("-")
-    for index in range(len(dotted_parts) - 1):
-        if dotted_parts[index].isdigit() and dotted_parts[index + 1].isdigit():
-            variants.append(
-                "-".join(
-                    (
-                        *dotted_parts[:index],
-                        f"{dotted_parts[index]}.{dotted_parts[index + 1]}",
-                        *dotted_parts[index + 2 :],
+    for marker in (".anthropic.", ".amazon."):
+        if marker in normalized:
+            variants.append(normalized.split(marker, 1)[1])
+    if "/" in normalized:
+        variants.append(normalized.rsplit("/", 1)[1])
+    for variant in tuple(variants):
+        dotted_parts = variant.split("-")
+        for index in range(len(dotted_parts) - 1):
+            if dotted_parts[index].isdigit() and dotted_parts[index + 1].isdigit():
+                variants.append(
+                    "-".join(
+                        (
+                            *dotted_parts[:index],
+                            f"{dotted_parts[index]}.{dotted_parts[index + 1]}",
+                            *dotted_parts[index + 2 :],
+                        )
                     )
                 )
-            )
     return tuple(dict.fromkeys(variants))
 
 
-def openai_api_price_for_model(model: str | None) -> tuple[float, float, float] | None:
+def api_price_key_for_model(model: str | None, prices: Mapping[str, Any]) -> str | None:
     variants = model_name_variants(model)
     if not variants:
         return None
+    matches: list[str] = []
     for normalized in variants:
-        if normalized in OPENAI_API_MODEL_PRICES_USD_PER_1M:
-            return OPENAI_API_MODEL_PRICES_USD_PER_1M[normalized]
-    prices = sorted(OPENAI_API_MODEL_PRICES_USD_PER_1M.items(), key=lambda item: len(item[0]), reverse=True)
+        if normalized in prices:
+            matches.append(normalized)
+    sorted_prices = sorted(prices.items(), key=lambda item: len(item[0]), reverse=True)
     for normalized in variants:
-        for prefix, price in prices:
+        for prefix, _price in sorted_prices:
             if normalized.startswith(prefix + "-") or normalized.startswith(prefix + "."):
-                return price
-    return None
+                matches.append(prefix)
+    return max(matches, key=len) if matches else None
+
+
+def openai_api_price_key_for_model(model: str | None) -> str | None:
+    return api_price_key_for_model(model, OPENAI_API_MODEL_PRICES_USD_PER_1M)
+
+
+def openai_api_price_for_model(model: str | None) -> tuple[float, float, float] | None:
+    key = openai_api_price_key_for_model(model)
+    return OPENAI_API_MODEL_PRICES_USD_PER_1M[key] if key else None
+
+
+def claude_api_price_key_for_model(model: str | None) -> str | None:
+    return api_price_key_for_model(model, CLAUDE_API_MODEL_PRICES_USD_PER_1M)
 
 
 def claude_api_price_for_model(model: str | None) -> tuple[float, float, float, float, float] | None:
-    variants = model_name_variants(model)
-    if not variants:
-        return None
-    for normalized in variants:
-        if normalized in CLAUDE_API_MODEL_PRICES_USD_PER_1M:
-            return CLAUDE_API_MODEL_PRICES_USD_PER_1M[normalized]
-    prices = sorted(CLAUDE_API_MODEL_PRICES_USD_PER_1M.items(), key=lambda item: len(item[0]), reverse=True)
-    for normalized in variants:
-        for prefix, price in prices:
-            if normalized.startswith(prefix + "-") or normalized.startswith(prefix + "."):
-                return price
-    return None
+    key = claude_api_price_key_for_model(model)
+    return CLAUDE_API_MODEL_PRICES_USD_PER_1M[key] if key else None
+
+
+def friendly_model_name(model: str | None) -> str:
+    raw_model = (model or "").strip()
+    if not raw_model:
+        return "(unknown)"
+    return openai_api_price_key_for_model(raw_model) or claude_api_price_key_for_model(raw_model) or raw_model
 
 
 def estimate_openai_api_cost(
@@ -1144,6 +1161,15 @@ def normalize_claude_code_metric_attrs(name: str | None, attrs: dict[str, Any]) 
     return attrs
 
 
+def is_claude_code_usage_duplicate_signal(signal: str, event_name: str | None, attrs: dict[str, Any]) -> bool:
+    if signal == "traces" and event_name == "claude_code.llm_request":
+        return True
+    service_name = first_attr(attrs, ("service.name", "source_kind"))
+    if signal == "logs" and event_name == "api_request" and service_name == "claude-code":
+        return True
+    return False
+
+
 def usage_from_attrs(
     signal: str,
     event_name: str | None,
@@ -1151,6 +1177,8 @@ def usage_from_attrs(
     config: AppConfig = DEFAULT_APP_CONFIG,
 ) -> dict[str, Any] | None:
     attrs = flatten_attrs(attrs)
+    if is_claude_code_usage_duplicate_signal(signal, event_name, attrs):
+        return None
     input_tokens = int_attr(attrs, TOKEN_KEYS["input"])
     output_tokens = int_attr(attrs, TOKEN_KEYS["output"])
     total_tokens = int_attr(attrs, TOKEN_KEYS["total"])
@@ -1180,7 +1208,8 @@ def usage_from_attrs(
 
     raw_model = first_attr(attrs, ("model", "model_name", "gen_ai.request.model", "gen_ai.response.model"))
     model = raw_model if config.storage.model else None
-    if config.pricing.estimate_openai_api_costs and cost_alias is None:
+    estimate_missing_cost = not (signal == "metrics" and event_name == "claude_code.token.usage")
+    if estimate_missing_cost and config.pricing.estimate_openai_api_costs and cost_alias is None:
         estimated_cost = estimate_openai_api_cost(
             raw_model,
             input_tokens,
@@ -1192,7 +1221,7 @@ def usage_from_attrs(
         if estimated_cost:
             cost_value = estimated_cost
             cost_unit = "USD"
-    if config.pricing.estimate_claude_api_costs and cost_alias is None:
+    if estimate_missing_cost and config.pricing.estimate_claude_api_costs and cost_alias is None:
         estimated_cost = estimate_claude_api_cost(
             raw_model,
             input_tokens,
@@ -1302,6 +1331,8 @@ def tool_event_from_attrs(
         "success": first_attr(attrs, ("success",)),
         "duration_ms": optional_int_attr(attrs, ("duration_ms", "duration")),
         "mcp_server": first_attr(attrs, ("mcp_server", "mcp_server_scope", "server_name")),
+        "trace_id": first_attr(attrs, ("trace_id", "traceId")),
+        "span_id": first_attr(attrs, ("span_id", "spanId")),
         "attributes_json": stored_tool_attributes_json(attrs, config),
     }
 
@@ -1312,7 +1343,12 @@ def iter_log_records(payload: dict[str, Any]) -> Iterable[tuple[str | None, dict
         for scope in resource.get("scopeLogs", []):
             scope_attrs = attrs_to_dict(scope.get("scope", {}).get("attributes"))
             for record in scope.get("logRecords", []):
-                attrs = merge_attrs(resource_attrs, scope_attrs, attrs_to_dict(record.get("attributes")))
+                attrs = merge_attrs(
+                    resource_attrs,
+                    scope_attrs,
+                    attrs_to_dict(record.get("attributes")),
+                    {"traceId": record.get("traceId"), "spanId": record.get("spanId")},
+                )
                 body = maybe_parse_json(otel_value(record.get("body")))
                 if isinstance(body, dict):
                     attrs = merge_attrs(attrs, body)
@@ -1404,77 +1440,115 @@ def insert_payload(
     return int(cur.lastrowid)
 
 
+def usage_client_event_id(event: dict[str, Any]) -> str:
+    explicit = event.get("client_event_id")
+    if explicit:
+        return str(explicit)
+    if event.get("trace_id") and event.get("span_id"):
+        parts = [event.get("signal"), event.get("trace_id"), event.get("span_id"), event.get("event_name")]
+        attrs = stored_event_attrs(event.get("attributes_json"))
+        token_type = attrs.get("type")
+        if token_type not in (None, ""):
+            parts.append(token_type)
+        return ":".join(str(part or "") for part in parts)
+    return f"evt_{secrets.token_urlsafe(18)}"
+
+
+def tool_client_event_id(event: dict[str, Any]) -> str:
+    explicit = event.get("client_tool_event_id")
+    if explicit:
+        return str(explicit)
+    if event.get("trace_id") and event.get("span_id"):
+        signal = event.get("signal", "tool")
+        tool_name = event.get("tool_name", "unknown")
+        return f"{signal}:{event.get('trace_id')}:{event.get('span_id')}:{tool_name}"
+    return f"tool_{secrets.token_urlsafe(18)}"
+
+
+def is_unique_constraint_error(exc: sqlite3.IntegrityError, column: str) -> bool:
+    message = str(exc).lower()
+    return "unique constraint failed" in message and column.lower() in message
+
+
 def insert_usage(con: sqlite3.Connection, raw_id: int, received_at: str, events: list[dict[str, Any]]) -> None:
     for event in events:
-        client_event_id = event.get("client_event_id") or f"evt_{secrets.token_urlsafe(18)}"
-        con.execute(
-            """
-            insert into usage_events(
-                raw_payload_id, received_at, signal, event_name, model, session_id, thread_id,
-                input_tokens, output_tokens, total_tokens, cached_tokens, reasoning_tokens,
-                source_kind, trace_id, span_id, workspace_label, api_key_label, provider_name,
-                cost_value, cost_unit, attributes_json, client_event_id
+        try:
+            con.execute(
+                """
+                insert into usage_events(
+                    raw_payload_id, received_at, signal, event_name, model, session_id, thread_id,
+                    input_tokens, output_tokens, total_tokens, cached_tokens, reasoning_tokens,
+                    source_kind, trace_id, span_id, workspace_label, api_key_label, provider_name,
+                    cost_value, cost_unit, attributes_json, client_event_id
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    raw_id,
+                    received_at,
+                    event["signal"],
+                    event["event_name"],
+                    event["model"],
+                    event["session_id"],
+                    event["thread_id"],
+                    event["input_tokens"],
+                    event["output_tokens"],
+                    event["total_tokens"],
+                    event["cached_tokens"],
+                    event["reasoning_tokens"],
+                    event.get("source_kind"),
+                    event.get("trace_id"),
+                    event.get("span_id"),
+                    event.get("workspace_label"),
+                    event.get("api_key_label"),
+                    event.get("provider_name"),
+                    float(event.get("cost_value") or 0),
+                    event.get("cost_unit"),
+                    event["attributes_json"],
+                    usage_client_event_id(event),
+                ),
             )
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                raw_id,
-                received_at,
-                event["signal"],
-                event["event_name"],
-                event["model"],
-                event["session_id"],
-                event["thread_id"],
-                event["input_tokens"],
-                event["output_tokens"],
-                event["total_tokens"],
-                event["cached_tokens"],
-                event["reasoning_tokens"],
-                event.get("source_kind"),
-                event.get("trace_id"),
-                event.get("span_id"),
-                event.get("workspace_label"),
-                event.get("api_key_label"),
-                event.get("provider_name"),
-                float(event.get("cost_value") or 0),
-                event.get("cost_unit"),
-                event["attributes_json"],
-                client_event_id,
-            ),
-        )
+        except sqlite3.IntegrityError as exc:
+            if is_unique_constraint_error(exc, "client_event_id"):
+                continue
+            raise
 
 
 def insert_tool_events(con: sqlite3.Connection, raw_id: int, received_at: str, events: list[dict[str, Any]]) -> None:
     for event in events:
-        client_tool_event_id = event.get("client_tool_event_id") or f"tool_{secrets.token_urlsafe(18)}"
-        con.execute(
-            """
-            insert into tool_events(
-                raw_payload_id, received_at, signal, event_name, model, session_id, thread_id,
-                tool_name, call_id, decision, source, success, duration_ms, mcp_server, attributes_json,
-                client_tool_event_id
+        try:
+            con.execute(
+                """
+                insert into tool_events(
+                    raw_payload_id, received_at, signal, event_name, model, session_id, thread_id,
+                    tool_name, call_id, decision, source, success, duration_ms, mcp_server, attributes_json,
+                    client_tool_event_id
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    raw_id,
+                    received_at,
+                    event["signal"],
+                    event["event_name"],
+                    event["model"],
+                    event["session_id"],
+                    event["thread_id"],
+                    event["tool_name"],
+                    event["call_id"],
+                    event["decision"],
+                    event["source"],
+                    event["success"],
+                    event["duration_ms"],
+                    event["mcp_server"],
+                    event["attributes_json"],
+                    tool_client_event_id(event),
+                ),
             )
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                raw_id,
-                received_at,
-                event["signal"],
-                event["event_name"],
-                event["model"],
-                event["session_id"],
-                event["thread_id"],
-                event["tool_name"],
-                event["call_id"],
-                event["decision"],
-                event["source"],
-                event["success"],
-                event["duration_ms"],
-                event["mcp_server"],
-                event["attributes_json"],
-                client_tool_event_id,
-            ),
-        )
+        except sqlite3.IntegrityError as exc:
+            if is_unique_constraint_error(exc, "client_tool_event_id"):
+                continue
+            raise
 
 
 def parse_datetime_filter(value: str | None, *, end_of_day: bool = False) -> str | None:
@@ -3858,8 +3932,8 @@ def server_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
         clauses.append("usage_events.source_received_at <= ?")
         params.append(until)
     if getattr(args, "model", None):
-        clauses.append("usage_events.model = ?")
-        params.append(args.model)
+        clauses.append("(usage_events.model = ? or friendly_model_name(usage_events.model) = ?)")
+        params.extend((args.model, args.model))
     if getattr(args, "session_id", None):
         clauses.append("usage_events.session_id = ?")
         params.append(args.session_id)
@@ -3956,6 +4030,14 @@ def source_label_expression() -> str:
     """
 
 
+def register_report_functions(con: sqlite3.Connection) -> None:
+    con.create_function("friendly_model_name", 1, friendly_model_name)
+
+
+def server_model_expression() -> str:
+    return "friendly_model_name(usage_events.model)"
+
+
 def server_group_expressions(group_by: str) -> tuple[str, str, str, str, str, str, str, str, str, str, str]:
     period_expr = "''"
     source_provider_expr = "''"
@@ -3977,7 +4059,7 @@ def server_group_expressions(group_by: str) -> tuple[str, str, str, str, str, st
     if group_by in ("client", "client-model", "day-client", "day-model-client"):
         client_expr = "coalesce(clients.display_name, usage_events.client_name, '(unknown)')"
     if group_by in ("model", "client-model", "day-model", "day-model-client", "provider-source-model"):
-        model_expr = "coalesce(model, '(unknown)')"
+        model_expr = server_model_expression()
     if group_by in ("session", "day-session"):
         session_expr = "coalesce(session_id, '(unknown)')"
     if group_by == "source":
@@ -4050,6 +4132,7 @@ def server_report_rows(
     args: argparse.Namespace,
     config: AppConfig = DEFAULT_APP_CONFIG,
 ) -> list[sqlite3.Row]:
+    register_report_functions(con)
     (
         period_expr,
         source_provider_expr,
