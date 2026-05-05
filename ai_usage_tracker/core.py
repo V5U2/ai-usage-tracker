@@ -4017,7 +4017,7 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
         cost_value_select = """
             case
               when count(distinct case
-                when coalesce(usage_events.cost_value, 0) != 0 then nullif(usage_events.cost_unit, '')
+                when coalesce(usage_events.cost_value, 0) != 0 then coalesce(nullif(usage_events.cost_unit, ''), '(unknown)')
               end) <= 1 then coalesce(sum(usage_events.cost_value), 0)
               else null
             end
@@ -4025,9 +4025,9 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
         cost_unit_select = """
             case
               when count(distinct case
-                when coalesce(usage_events.cost_value, 0) != 0 then nullif(usage_events.cost_unit, '')
+                when coalesce(usage_events.cost_value, 0) != 0 then coalesce(nullif(usage_events.cost_unit, ''), '(unknown)')
               end) <= 1 then max(case
-                when coalesce(usage_events.cost_value, 0) != 0 then nullif(usage_events.cost_unit, '')
+                when coalesce(usage_events.cost_value, 0) != 0 then coalesce(nullif(usage_events.cost_unit, ''), '(unknown)')
               end)
               else 'mixed'
             end
@@ -4170,15 +4170,15 @@ def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
             coalesce(sum(reasoning_tokens), 0) as reasoning_tokens,
             case
               when count(distinct case
-                when coalesce(cost_value, 0) != 0 then nullif(cost_unit, '')
+                when coalesce(cost_value, 0) != 0 then coalesce(nullif(cost_unit, ''), '(unknown)')
               end) <= 1 then coalesce(sum(cost_value), 0)
               else null
             end as cost_value,
             case
               when count(distinct case
-                when coalesce(cost_value, 0) != 0 then nullif(cost_unit, '')
+                when coalesce(cost_value, 0) != 0 then coalesce(nullif(cost_unit, ''), '(unknown)')
               end) <= 1 then max(case
-                when coalesce(cost_value, 0) != 0 then nullif(cost_unit, '')
+                when coalesce(cost_value, 0) != 0 then coalesce(nullif(cost_unit, ''), '(unknown)')
               end)
               else 'mixed'
             end as cost_unit,
