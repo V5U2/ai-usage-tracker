@@ -105,6 +105,18 @@ TOKEN_KEYS = {
         "gen_ai.usage.output_reasoning_tokens",
     ),
 }
+COST_VALUE_KEYS = (
+    "gen_ai.usage.cost_usd",
+    "usage.cost_usd",
+    "cost_usd",
+    "cost",
+    "usage.cost",
+    "gen_ai.usage.total_cost",
+    "gen_ai.usage.cost",
+    "openrouter.cost",
+    "openrouter.credits",
+)
+USD_COST_VALUE_KEYS = frozenset(COST_VALUE_KEYS)
 REPORT_COLUMNS = (
     "period",
     "model",
@@ -1147,36 +1159,13 @@ def usage_from_attrs(
         ("cache_creation_tokens", "cache_creation_input_tokens", "usage.cache_creation_input_tokens"),
     )
     reasoning_tokens = int_attr(attrs, TOKEN_KEYS["reasoning"])
-    cost_value, cost_alias = float_attr(
-        attrs,
-        (
-            "gen_ai.usage.cost_usd",
-            "usage.cost_usd",
-            "cost_usd",
-            "cost",
-            "usage.cost",
-            "gen_ai.usage.total_cost",
-            "gen_ai.usage.cost",
-            "openrouter.cost",
-            "openrouter.credits",
-        ),
-    )
+    cost_value, cost_alias = float_attr(attrs, COST_VALUE_KEYS)
     cost_unit = first_attr(
         attrs,
         ("cost_unit", "cost.currency", "gen_ai.usage.cost_unit", "gen_ai.usage.cost_currency", "openrouter.cost_unit"),
     )
     if cost_alias is not None and not cost_unit:
-        if cost_alias in (
-            "gen_ai.usage.cost_usd",
-            "usage.cost_usd",
-            "cost_usd",
-            "cost",
-            "usage.cost",
-            "gen_ai.usage.total_cost",
-            "gen_ai.usage.cost",
-            "openrouter.cost",
-            "openrouter.credits",
-        ):
+        if cost_alias in USD_COST_VALUE_KEYS:
             cost_unit = "USD"
         else:
             cost_unit = "credits"
@@ -3976,6 +3965,15 @@ def server_group_expressions(group_by: str) -> tuple[str, str, str, str, str, st
     )
 
 
+def nonzero_cost_unit_expression(prefix: str = "") -> str:
+    return (
+        "case "
+        f"when coalesce({prefix}cost_value, 0) != 0 "
+        f"then coalesce(nullif({prefix}cost_unit, ''), '(unknown)') "
+        "end"
+    )
+
+
 def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, str]:
     period_expr = "''"
     client_expr = "''"
@@ -4014,24 +4012,19 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
     cost_unit_select = cost_unit_expr
     cost_group = "11"
     if not cost_unit_grouped:
+        nonzero_cost_unit_expr = nonzero_cost_unit_expression("usage_events.")
         cost_value_select = """
             case
-              when count(distinct case
-                when coalesce(usage_events.cost_value, 0) != 0 then coalesce(nullif(usage_events.cost_unit, ''), '(unknown)')
-              end) <= 1 then coalesce(sum(usage_events.cost_value), 0)
+              when count(distinct {nonzero_cost_unit_expr}) <= 1 then coalesce(sum(usage_events.cost_value), 0)
               else null
             end
-        """
+        """.format(nonzero_cost_unit_expr=nonzero_cost_unit_expr)
         cost_unit_select = """
             case
-              when count(distinct case
-                when coalesce(usage_events.cost_value, 0) != 0 then coalesce(nullif(usage_events.cost_unit, ''), '(unknown)')
-              end) <= 1 then max(case
-                when coalesce(usage_events.cost_value, 0) != 0 then coalesce(nullif(usage_events.cost_unit, ''), '(unknown)')
-              end)
+              when count(distinct {nonzero_cost_unit_expr}) <= 1 then max({nonzero_cost_unit_expr})
               else 'mixed'
             end
-        """
+        """.format(nonzero_cost_unit_expr=nonzero_cost_unit_expr)
         cost_group = "''"
     where, params = server_where_clause(args)
     order_by = "last_seen desc"
@@ -4158,8 +4151,9 @@ def server_tool_summary(con: sqlite3.Connection, args: argparse.Namespace) -> sq
 
 
 def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
+    nonzero_cost_unit_expr = nonzero_cost_unit_expression()
     totals = con.execute(
-        """
+        f"""
         select
             count(*) as usage_events,
             count(distinct client_name) as active_clients,
@@ -4169,17 +4163,11 @@ def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
             coalesce(sum(cached_tokens), 0) as cached_tokens,
             coalesce(sum(reasoning_tokens), 0) as reasoning_tokens,
             case
-              when count(distinct case
-                when coalesce(cost_value, 0) != 0 then coalesce(nullif(cost_unit, ''), '(unknown)')
-              end) <= 1 then coalesce(sum(cost_value), 0)
+              when count(distinct {nonzero_cost_unit_expr}) <= 1 then coalesce(sum(cost_value), 0)
               else null
             end as cost_value,
             case
-              when count(distinct case
-                when coalesce(cost_value, 0) != 0 then coalesce(nullif(cost_unit, ''), '(unknown)')
-              end) <= 1 then max(case
-                when coalesce(cost_value, 0) != 0 then coalesce(nullif(cost_unit, ''), '(unknown)')
-              end)
+              when count(distinct {nonzero_cost_unit_expr}) <= 1 then max({nonzero_cost_unit_expr})
               else 'mixed'
             end as cost_unit,
             min(source_received_at) as first_seen,
