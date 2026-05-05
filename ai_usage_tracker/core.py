@@ -39,7 +39,7 @@ def env_value(name: str, default: str) -> str:
 
 
 REPO_URL = "https://github.com/V5U2/ai-usage-tracker"
-APP_VERSION = env_value("AI_USAGE_VERSION", "0.4.0")
+APP_VERSION = env_value("AI_USAGE_VERSION", "0.4.1")
 APP_COMMIT = env_value("AI_USAGE_COMMIT", "")
 DEFAULT_DB = Path(env_value("AI_USAGE_DB", "ai_usage.sqlite"))
 DEFAULT_SERVER_DB = Path(env_value("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite"))
@@ -105,6 +105,18 @@ TOKEN_KEYS = {
         "gen_ai.usage.output_reasoning_tokens",
     ),
 }
+COST_VALUE_KEYS = (
+    "gen_ai.usage.cost_usd",
+    "usage.cost_usd",
+    "cost_usd",
+    "cost",
+    "usage.cost",
+    "gen_ai.usage.total_cost",
+    "gen_ai.usage.cost",
+    "openrouter.cost",
+    "openrouter.credits",
+)
+USD_COST_VALUE_KEYS = frozenset(COST_VALUE_KEYS)
 REPORT_COLUMNS = (
     "period",
     "model",
@@ -300,6 +312,7 @@ class PricingConfig:
     estimate_openai_api_costs: bool = False
     estimate_claude_api_costs: bool = False
     include_reasoning_tokens_as_output: bool = True
+    report_openrouter_credits_as_usd: bool = False
 
 
 @dataclass(frozen=True)
@@ -507,6 +520,7 @@ def load_config(path: Path | None) -> AppConfig:
         estimate_openai_api_costs=bool_config(pricing_data, "estimate_openai_api_costs", False),
         estimate_claude_api_costs=bool_config(pricing_data, "estimate_claude_api_costs", False),
         include_reasoning_tokens_as_output=bool_config(pricing_data, "include_reasoning_tokens_as_output", True),
+        report_openrouter_credits_as_usd=bool_config(pricing_data, "report_openrouter_credits_as_usd", False),
     )
     return AppConfig(
         client_name=str_config(data, "client_name", "local"),
@@ -1175,36 +1189,13 @@ def usage_from_attrs(
         ("cache_creation_tokens", "cache_creation_input_tokens", "usage.cache_creation_input_tokens"),
     )
     reasoning_tokens = int_attr(attrs, TOKEN_KEYS["reasoning"])
-    cost_value, cost_alias = float_attr(
-        attrs,
-        (
-            "gen_ai.usage.cost_usd",
-            "usage.cost_usd",
-            "cost_usd",
-            "cost",
-            "usage.cost",
-            "gen_ai.usage.total_cost",
-            "gen_ai.usage.cost",
-            "openrouter.cost",
-            "openrouter.credits",
-        ),
-    )
+    cost_value, cost_alias = float_attr(attrs, COST_VALUE_KEYS)
     cost_unit = first_attr(
         attrs,
         ("cost_unit", "cost.currency", "gen_ai.usage.cost_unit", "gen_ai.usage.cost_currency", "openrouter.cost_unit"),
     )
     if cost_alias is not None and not cost_unit:
-        if cost_alias in (
-            "gen_ai.usage.cost_usd",
-            "usage.cost_usd",
-            "cost_usd",
-            "cost",
-            "usage.cost",
-            "gen_ai.usage.total_cost",
-            "gen_ai.usage.cost",
-            "openrouter.cost",
-            "openrouter.credits",
-        ):
+        if cost_alias in USD_COST_VALUE_KEYS:
             cost_unit = "USD"
         else:
             cost_unit = "credits"
@@ -1808,6 +1799,18 @@ def server_html_cell(column: str, value: Any, *, classes: str = "") -> str:
     return f"<td{class_attr}>{html.escape(format_cell(column, value))}</td>"
 
 
+def format_cost_summary(stats: Mapping[str, Any]) -> str:
+    cost_totals = stats.get("cost_totals") or []
+    if cost_totals:
+        parts = []
+        for row in cost_totals:
+            value = format_cell("cost_value", row.get("cost_value"))
+            unit = str(row.get("cost_unit") or "")
+            parts.append(f"{value} {unit}".strip())
+        return " + ".join(parts)
+    return f'{format_cell("cost_value", stats.get("cost_value"))} {str(stats.get("cost_unit") or "")}'.strip()
+
+
 def default_columns(group_by: str) -> tuple[str, ...]:
     if group_by == "total":
         return (
@@ -2000,9 +2003,10 @@ def server_default_columns(group_by: str) -> tuple[str, ...]:
 
 def server_tool_default_columns(group_by: str) -> tuple[str, ...]:
     if group_by == "client":
-        return ("client_name", "tool_events", "successes", "failures", "total_duration_ms", "last_seen")
+        return ("source_provider", "client_name", "tool_events", "successes", "failures", "total_duration_ms", "last_seen")
     if group_by == "client-tool":
         return (
+            "source_provider",
             "client_name",
             "tool_name",
             "tool_events",
@@ -2013,10 +2017,19 @@ def server_tool_default_columns(group_by: str) -> tuple[str, ...]:
             "last_seen",
         )
     if group_by == "day-client":
-        return ("period", "client_name", "tool_events", "successes", "failures", "total_duration_ms")
+        return ("period", "source_provider", "client_name", "tool_events", "successes", "failures", "total_duration_ms")
     if group_by == "day-tool-client":
-        return ("period", "client_name", "tool_name", "tool_events", "successes", "failures", "total_duration_ms")
-    return tool_default_columns(group_by)
+        return (
+            "period",
+            "source_provider",
+            "client_name",
+            "tool_name",
+            "tool_events",
+            "successes",
+            "failures",
+            "total_duration_ms",
+        )
+    return ("source_provider", *tool_default_columns(group_by))
 
 
 def print_compact_rows(rows: Sequence[sqlite3.Row], columns: Sequence[str]) -> None:
@@ -2425,8 +2438,9 @@ class ServerReceiver(BaseHTTPRequestHandler):
 
     def render_reports(self, con: sqlite3.Connection, query: dict[str, list[str]]) -> str:
         args = ServerReceiver.reports_args(query)
-        stats = server_stats_dict(con)
-        rows = server_report_rows(con, args)
+        app_config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
+        stats = server_stats_dict(con, app_config)
+        rows = server_report_rows(con, args, app_config)
         columns = server_default_columns(args.group_by)
 
         group_options = "\n".join(
@@ -2469,7 +2483,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       <div><div class="label">Total tokens</div><div class="value">{format_cell("total_tokens", stats["total_tokens"])}</div></div>
 	      <div><div class="label">Input</div><div class="value">{format_cell("input_tokens", stats["input_tokens"])}</div></div>
 	      <div><div class="label">Output</div><div class="value">{format_cell("output_tokens", stats["output_tokens"])}</div></div>
-	      <div><div class="label">Cost</div><div class="value">{format_cell("cost_value", stats["cost_value"])} {html.escape(str(stats.get("cost_unit") or ""))}</div></div>
+	      <div><div class="label">Cost</div><div class="value">{html.escape(format_cost_summary(stats))}</div></div>
 	      <div><div class="label">Tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
       <div><div class="label">Collectors</div><div class="value">{format_cell("events", stats["configured_clients"])}</div></div>
     </section>
@@ -2505,6 +2519,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
         columns = server_tool_default_columns(args.group_by)
         recent_columns = (
             "source_received_at",
+            "source_provider",
             "client_name",
             "tool_name",
             "success",
@@ -2512,8 +2527,6 @@ class ServerReceiver(BaseHTTPRequestHandler):
             "decision",
             "source",
             "mcp_server",
-            "session_id",
-            "call_id",
         )
 
         group_options = "\n".join(
@@ -2737,14 +2750,14 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 if not require_admin(self.app_config, self.headers):
                     self.send_json(401, {"error": "admin authorization required"})
                     return
-                self.send_json(200, server_stats_dict(con))
+                self.send_json(200, server_stats_dict(con, self.app_config))
                 return
             if parsed.path == "/api/v1/reports/usage":
                 if not require_admin(self.app_config, self.headers):
                     self.send_json(401, {"error": "admin authorization required"})
                     return
                 args = self.reports_args(query)
-                rows = [dict(row) for row in server_report_rows(con, args)]
+                rows = [dict(row) for row in server_report_rows(con, args, self.app_config)]
                 self.send_json(200, {"rows": rows})
                 return
             if parsed.path == "/api/v1/reports/tools":
@@ -3982,6 +3995,20 @@ def source_provider_expression(table: str = "usage_events") -> str:
     """
 
 
+def tool_source_provider_expression() -> str:
+    return """
+        case
+          when tool_events.event_name like 'claude_code.%'
+            or lower(coalesce(tool_events.model, '')) like 'claude%'
+            or lower(coalesce(tool_events.model, '')) like 'au.anthropic.%'
+            then 'Claude Code'
+          when tool_events.event_name like 'codex.%'
+            then 'Codex'
+          else 'Local OTEL'
+        end
+    """
+
+
 def source_label_expression() -> str:
     return f"""
         case
@@ -4058,8 +4085,31 @@ def server_group_expressions(group_by: str) -> tuple[str, str, str, str, str, st
     )
 
 
-def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, str]:
+def report_cost_unit_expression(prefix: str = "", config: AppConfig = DEFAULT_APP_CONFIG) -> str:
+    cost_unit = f"nullif({prefix}cost_unit, '')"
+    if not config.pricing.report_openrouter_credits_as_usd:
+        return f"coalesce({cost_unit}, '(unknown)')"
+    return (
+        "case "
+        f"when {prefix}source_kind = '{OPENROUTER_SOURCE_KIND}' "
+        f"and lower(coalesce({cost_unit}, '')) = 'credits' then 'USD' "
+        f"else coalesce({cost_unit}, '(unknown)') "
+        "end"
+    )
+
+
+def nonzero_cost_unit_expression(prefix: str = "", config: AppConfig = DEFAULT_APP_CONFIG) -> str:
+    return (
+        "case "
+        f"when coalesce({prefix}cost_value, 0) != 0 "
+        f"then {report_cost_unit_expression(prefix, config)} "
+        "end"
+    )
+
+
+def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, str, str]:
     period_expr = "''"
+    source_provider_expr = tool_source_provider_expression()
     client_expr = "''"
     tool_expr = "''"
     session_expr = "''"
@@ -4074,10 +4124,14 @@ def server_tool_group_expressions(group_by: str) -> tuple[str, str, str, str, st
         session_expr = "coalesce(session_id, '(unknown)')"
     if group_by == "event":
         event_expr = "event_name"
-    return period_expr, client_expr, tool_expr, session_expr, event_expr
+    return period_expr, source_provider_expr, client_expr, tool_expr, session_expr, event_expr
 
 
-def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
+def server_report_rows(
+    con: sqlite3.Connection,
+    args: argparse.Namespace,
+    config: AppConfig = DEFAULT_APP_CONFIG,
+) -> list[sqlite3.Row]:
     register_report_functions(con)
     (
         period_expr,
@@ -4097,24 +4151,19 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
     cost_unit_select = cost_unit_expr
     cost_group = "11"
     if not cost_unit_grouped:
+        nonzero_cost_unit_expr = nonzero_cost_unit_expression("usage_events.", config)
         cost_value_select = """
             case
-              when count(distinct case
-                when coalesce(usage_events.cost_value, 0) != 0 then coalesce(nullif(usage_events.cost_unit, ''), '(unknown)')
-              end) <= 1 then coalesce(sum(usage_events.cost_value), 0)
+              when count(distinct {nonzero_cost_unit_expr}) <= 1 then coalesce(sum(usage_events.cost_value), 0)
               else null
             end
-        """
+        """.format(nonzero_cost_unit_expr=nonzero_cost_unit_expr)
         cost_unit_select = """
             case
-              when count(distinct case
-                when coalesce(usage_events.cost_value, 0) != 0 then coalesce(nullif(usage_events.cost_unit, ''), '(unknown)')
-              end) <= 1 then max(case
-                when coalesce(usage_events.cost_value, 0) != 0 then coalesce(nullif(usage_events.cost_unit, ''), '(unknown)')
-              end)
+              when count(distinct {nonzero_cost_unit_expr}) <= 1 then max({nonzero_cost_unit_expr})
               else 'mixed'
             end
-        """
+        """.format(nonzero_cost_unit_expr=nonzero_cost_unit_expr)
         cost_group = "''"
     where, params = server_where_clause(args)
     order_by = "last_seen desc"
@@ -4167,7 +4216,9 @@ def server_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> lis
 
 
 def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
-    period_expr, client_expr, tool_expr, session_expr, event_expr = server_tool_group_expressions(args.group_by)
+    period_expr, source_provider_expr, client_expr, tool_expr, session_expr, event_expr = server_tool_group_expressions(
+        args.group_by
+    )
     where, params = server_tool_where_clause(args)
     order_by = "last_seen desc"
     if args.group_by.startswith("day"):
@@ -4177,6 +4228,7 @@ def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -
     query = f"""
         select
             {period_expr} as period,
+            {source_provider_expr} as source_provider,
             {client_expr} as client_name,
             {tool_expr} as tool_name,
             {session_expr} as session_id,
@@ -4191,7 +4243,7 @@ def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -
         from tool_events
         left join clients on clients.client_name = tool_events.client_name
         {where}
-        group by 1, 2, 3, 4, 5
+        group by 1, 2, 3, 4, 5, 6
         order by {order_by}
         limit ?
     """
@@ -4200,9 +4252,15 @@ def server_tool_report_rows(con: sqlite3.Connection, args: argparse.Namespace) -
 
 def server_tool_recent_rows(con: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
     where, params = server_tool_where_clause(args)
+    provider_expr = tool_source_provider_expression()
+    if where:
+        where = f"{where} and tool_events.success in ('true', 'false')"
+    else:
+        where = "where tool_events.success in ('true', 'false')"
     query = f"""
         select
             tool_events.source_received_at,
+            {provider_expr} as source_provider,
             coalesce(clients.display_name, tool_events.client_name, '(unknown)') as client_name,
             tool_events.tool_name,
             tool_events.event_name,
@@ -4210,9 +4268,7 @@ def server_tool_recent_rows(con: sqlite3.Connection, args: argparse.Namespace) -
             tool_events.duration_ms,
             tool_events.decision,
             tool_events.source,
-            tool_events.mcp_server,
-            tool_events.session_id,
-            tool_events.call_id
+            tool_events.mcp_server
         from tool_events
         left join clients on clients.client_name = tool_events.client_name
         {where}
@@ -4240,9 +4296,10 @@ def server_tool_summary(con: sqlite3.Connection, args: argparse.Namespace) -> sq
     return con.execute(query, params).fetchone()
 
 
-def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
+def server_stats_dict(con: sqlite3.Connection, config: AppConfig = DEFAULT_APP_CONFIG) -> dict[str, Any]:
+    nonzero_cost_unit_expr = nonzero_cost_unit_expression("", config)
     totals = con.execute(
-        """
+        f"""
         select
             count(*) as usage_events,
             count(distinct client_name) as active_clients,
@@ -4252,17 +4309,11 @@ def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
             coalesce(sum(cached_tokens), 0) as cached_tokens,
             coalesce(sum(reasoning_tokens), 0) as reasoning_tokens,
             case
-              when count(distinct case
-                when coalesce(cost_value, 0) != 0 then coalesce(nullif(cost_unit, ''), '(unknown)')
-              end) <= 1 then coalesce(sum(cost_value), 0)
+              when count(distinct {nonzero_cost_unit_expr}) <= 1 then coalesce(sum(cost_value), 0)
               else null
             end as cost_value,
             case
-              when count(distinct case
-                when coalesce(cost_value, 0) != 0 then coalesce(nullif(cost_unit, ''), '(unknown)')
-              end) <= 1 then max(case
-                when coalesce(cost_value, 0) != 0 then coalesce(nullif(cost_unit, ''), '(unknown)')
-              end)
+              when count(distinct {nonzero_cost_unit_expr}) <= 1 then max({nonzero_cost_unit_expr})
               else 'mixed'
             end as cost_unit,
             min(source_received_at) as first_seen,
@@ -4270,9 +4321,24 @@ def server_stats_dict(con: sqlite3.Connection) -> dict[str, Any]:
         from usage_events
         """
     ).fetchone()
+    cost_totals = [
+        dict(row)
+        for row in con.execute(
+            f"""
+            select
+                {nonzero_cost_unit_expr} as cost_unit,
+                coalesce(sum(cost_value), 0) as cost_value
+            from usage_events
+            where {nonzero_cost_unit_expr} is not null
+            group by 1
+            order by case when {nonzero_cost_unit_expr} = 'USD' then 0 else 1 end, 1
+            """
+        ).fetchall()
+    ]
     clients = con.execute("select count(*) from clients where revoked_at is null").fetchone()[0]
     tool_events = con.execute("select count(*) from tool_events").fetchone()[0]
     out = dict(totals)
+    out["cost_totals"] = cost_totals
     out["configured_clients"] = clients
     out["tool_events"] = tool_events
     return out

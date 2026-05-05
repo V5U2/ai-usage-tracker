@@ -827,6 +827,7 @@ retain_payload_body = true
 estimate_openai_api_costs = true
 estimate_claude_api_costs = true
 include_reasoning_tokens_as_output = false
+report_openrouter_credits_as_usd = true
 """,
                 encoding="utf-8",
             )
@@ -836,6 +837,7 @@ include_reasoning_tokens_as_output = false
             self.assertTrue(config.pricing.estimate_openai_api_costs)
             self.assertTrue(config.pricing.estimate_claude_api_costs)
             self.assertFalse(config.pricing.include_reasoning_tokens_as_output)
+            self.assertTrue(config.pricing.report_openrouter_credits_as_usd)
 
     def test_load_config_keeps_legacy_server_section_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2398,6 +2400,102 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIsNone(rows[0]["cost_value"])
             self.assertEqual(rows[0]["cost_unit"], "mixed")
 
+    def test_reports_page_shows_cost_breakdown_for_mixed_units(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            for event_id, cost_value, cost_unit in (
+                ("api-cost", 2.5, "USD"),
+                ("openrouter-cost", 0.125, "credits"),
+            ):
+                app.ingest_usage_events(
+                    con,
+                    "client-a",
+                    [
+                        {
+                            "client_event_id": event_id,
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "traces",
+                            "model": "gpt-test",
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2,
+                            "cost_value": cost_value,
+                            "cost_unit": cost_unit,
+                            "attributes_json": "{}",
+                        }
+                    ],
+                )
+            con.commit()
+
+            stats = app.server_stats_dict(con)
+            body = app.ServerReceiver.render_reports(object(), con, {})
+            con.close()
+
+            self.assertEqual(stats["cost_unit"], "mixed")
+            self.assertEqual(
+                stats["cost_totals"],
+                [{"cost_unit": "USD", "cost_value": 2.5}, {"cost_unit": "credits", "cost_value": 0.125}],
+            )
+            self.assertIn('<div class="label">Cost</div><div class="value">2.5 USD + 0.125 credits</div>', body)
+            self.assertNotIn('<div class="label">Cost</div><div class="value"> mixed</div>', body)
+
+    def test_server_can_report_openrouter_credits_as_usd_without_rewriting_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            for event_id, cost_value, cost_unit, source_kind in (
+                ("api-cost", 2.5, "USD", "logs"),
+                ("openrouter-cost", 0.125, "credits", "openrouter_broadcast"),
+            ):
+                app.ingest_usage_events(
+                    con,
+                    "client-a",
+                    [
+                        {
+                            "client_event_id": event_id,
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "traces",
+                            "model": "gpt-test",
+                            "source_kind": source_kind,
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2,
+                            "cost_value": cost_value,
+                            "cost_unit": cost_unit,
+                            "attributes_json": "{}",
+                        }
+                    ],
+                )
+            con.commit()
+            args = argparse.Namespace(
+                group_by="total",
+                since=None,
+                until=None,
+                model=None,
+                session_id=None,
+                client_name=None,
+                source_kind=None,
+                workspace_label=None,
+                api_key_label=None,
+                provider_name=None,
+                limit=100,
+            )
+            config = app.AppConfig(pricing=app.PricingConfig(report_openrouter_credits_as_usd=True))
+
+            rows = app.server_report_rows(con, args, config)
+            stats = app.server_stats_dict(con, config)
+            stored = con.execute(
+                "select cost_value, cost_unit from usage_events where client_event_id = 'openrouter-cost'"
+            ).fetchone()
+            con.close()
+
+            self.assertEqual(len(rows), 1)
+            self.assertAlmostEqual(rows[0]["cost_value"], 2.625)
+            self.assertEqual(rows[0]["cost_unit"], "USD")
+            self.assertAlmostEqual(stats["cost_value"], 2.625)
+            self.assertEqual(stats["cost_unit"], "USD")
+            self.assertEqual(stats["cost_totals"], [{"cost_unit": "USD", "cost_value": 2.625}])
+            self.assertEqual(stored["cost_unit"], "credits")
+
     def test_server_reports_do_not_split_hidden_cost_units(self):
         with tempfile.TemporaryDirectory() as tmp:
             con = app.connect_server(Path(tmp) / "server.sqlite")
@@ -2615,13 +2713,30 @@ class ServerHttpTests(unittest.TestCase):
                 "laptop",
                 [
                     {
+                        "client_tool_event_id": "tool-decision",
+                        "received_at": "2026-05-04T01:02:04+00:00",
+                        "signal": "logs",
+                        "event_name": "codex.tool_decision",
+                        "tool_name": "exec_command",
+                        "decision": "accept",
+                        "source": "config",
+                        "success": None,
+                        "attributes_json": "{}",
+                    },
+                    {
                         "client_tool_event_id": "tool-1",
                         "received_at": "2026-05-04T01:02:03+00:00",
                         "signal": "logs",
                         "event_name": "codex.tool_result",
+                        "model": "gpt-5.5",
+                        "session_id": "session-1",
                         "tool_name": "exec_command",
+                        "call_id": "call-1",
+                        "decision": "accept",
+                        "source": "config",
                         "success": "true",
                         "duration_ms": 42,
+                        "mcp_server": "",
                         "attributes_json": "{}",
                     }
                 ],
@@ -2633,6 +2748,9 @@ class ServerHttpTests(unittest.TestCase):
                 con,
                 {},
             )
+            args = app.ServerReceiver.tool_reports_args({})
+            grouped_rows = app.server_tool_report_rows(con, args)
+            recent_rows = app.server_tool_recent_rows(con, args)
 
             self.assertIn("Tool Reports", body)
             self.assertSharedNav(body, "tools")
@@ -2640,13 +2758,23 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("Grouped totals", body)
             self.assertIn("Recent tool calls", body)
             self.assertIn("By collector/tool", body)
+            self.assertIn("<th>provider</th>", body)
             self.assertIn("<th>collector</th>", body)
             self.assertIn('class="status ok"', body)
+            self.assertNotIn('class="status neutral"', body)
             self.assertIn("<td>Laptop</td>", body)
             self.assertNotIn("<td>laptop</td>", body)
+            self.assertIn("<td>Codex</td>", body)
             self.assertIn("<td>exec_command</td>", body)
             self.assertIn("<td class=\"num\">42</td>", body)
+            self.assertNotIn("session-1", body)
+            self.assertNotIn("call-1", body)
             self.assertIn('data-utc="2026-05-04T01:02:03+00:00"', body)
+            self.assertEqual(len(grouped_rows), 1)
+            self.assertEqual(grouped_rows[0]["source_provider"], "Codex")
+            self.assertEqual(len(recent_rows), 1)
+            self.assertEqual(recent_rows[0]["source_received_at"], "2026-05-04T01:02:03+00:00")
+            self.assertEqual(recent_rows[0]["source_provider"], "Codex")
             self.assertIn("Intl.DateTimeFormat", body)
             con.close()
 
