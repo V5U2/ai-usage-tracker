@@ -1298,6 +1298,69 @@ class ServerHttpTests(unittest.TestCase):
             self.assertFalse(app.authenticate_client(con, "laptop", token))
             con.close()
 
+    def test_collector_ingest_updates_duplicate_usage_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            token = "unused"
+            first_event = {
+                "client_event_id": "evt-1",
+                "received_at": "2026-05-04T01:02:03+00:00",
+                "signal": "logs",
+                "event_name": "response.completed",
+                "model": "gpt-test",
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_tokens": 3,
+                "cached_tokens": 0,
+                "reasoning_tokens": 0,
+                "cost_value": 0,
+                "attributes_json": "{}",
+            }
+            updated_event = dict(first_event)
+            updated_event.update({"cost_value": 0.123, "cost_unit": "USD", "attributes_json": '{"updated": true}'})
+            payloads = [
+                {"client_name": "laptop", "events": [first_event]},
+                {"client_name": "laptop", "events": [updated_event]},
+            ]
+            responses = []
+
+            def run_request(payload):
+                body = json.dumps(payload).encode()
+                handler = object.__new__(app.ServerReceiver)
+                handler.db_path = db
+                handler.app_config = app.AppConfig()
+                handler.path = "/api/v1/usage-events"
+                handler.headers = {
+                    "content-length": str(len(body)),
+                    "content-type": "application/json",
+                    "authorization": f"Bearer {token}",
+                }
+                handler.rfile = io.BytesIO(body)
+                handler.wfile = io.BytesIO()
+                handler.send_response = responses.append
+                handler.send_header = lambda _key, _value: None
+                handler.end_headers = lambda: None
+                handler.do_POST()
+
+            con = app.connect_server(db)
+            token = app.create_client_token(con, "laptop", "Laptop")
+            con.commit()
+            con.close()
+
+            run_request(payloads[0])
+            run_request(payloads[1])
+
+            con = app.connect_server(db)
+            rows = con.execute("select * from usage_events").fetchall()
+            con.close()
+
+            self.assertEqual(responses, [200, 200])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["client_event_id"], "evt-1")
+            self.assertAlmostEqual(rows[0]["cost_value"], 0.123)
+            self.assertEqual(rows[0]["cost_unit"], "USD")
+            self.assertEqual(rows[0]["attributes_json"], '{"updated": true}')
+
     def test_openrouter_broadcast_ingest_auth_dedupe_and_fields(self):
         body = json.dumps(openrouter_trace_payload()).encode()
         with tempfile.TemporaryDirectory() as tmp:

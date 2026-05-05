@@ -2638,7 +2638,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 if not isinstance(tool_events, list):
                     self.send_json(400, {"error": "tool_events must be a list"})
                     return
-                accepted, duplicates = ingest_usage_events(con, client_name, events)
+                accepted, duplicates = ingest_usage_events(con, client_name, events, update_existing=True)
                 accepted_tool_events, duplicate_tool_events = ingest_tool_events(con, client_name, tool_events)
                 con.commit()
                 self.send_json(
