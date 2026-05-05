@@ -72,6 +72,25 @@ def openrouter_trace_payload_with_time(nanos):
     return payload
 
 
+def observed_openrouter_trace_payload():
+    payload = openrouter_trace_payload()
+    attrs = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+    attrs[:] = [
+        {"key": "gen_ai.request.model", "value": {"stringValue": "moonshotai/kimi-k2.5"}},
+        {"key": "gen_ai.provider.name", "value": {"stringValue": "moonshotai"}},
+        {"key": "gen_ai.system", "value": {"stringValue": "moonshotai"}},
+        {"key": "gen_ai.usage.input_tokens", "value": {"intValue": "15041"}},
+        {"key": "gen_ai.usage.output_tokens", "value": {"intValue": "70"}},
+        {"key": "gen_ai.usage.total_tokens", "value": {"intValue": "15111"}},
+        {"key": "gen_ai.usage.total_cost", "value": {"doubleValue": "0.00639196"}},
+        {"key": "trace.metadata.openrouter.api_key_name", "value": {"stringValue": "prod-key"}},
+        {"key": "trace.metadata.openrouter.entity_id", "value": {"stringValue": "org_123"}},
+        {"key": "trace.metadata.openrouter.provider_name", "value": {"stringValue": "Chutes"}},
+        {"key": "trace.metadata.openrouter.provider_slug", "value": {"stringValue": "chutes/int4"}},
+    ]
+    return payload
+
+
 class ComponentLayoutTests(unittest.TestCase):
     def test_component_packages_expose_expected_surfaces(self):
         self.assertIs(collector.Receiver, core.Receiver)
@@ -135,6 +154,20 @@ class ExtractionTests(unittest.TestCase):
         self.assertIsNotNone(event)
         self.assertEqual(event["cost_value"], 0.25)
         self.assertEqual(event["cost_unit"], "USD")
+
+    def test_extracts_observed_openrouter_broadcast_fields(self):
+        body = json.dumps(observed_openrouter_trace_payload()).encode()
+        config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))
+
+        event = app.normalize_openrouter_broadcast(body, config)[0]
+
+        self.assertEqual(event["model"], "moonshotai/kimi-k2.5")
+        self.assertEqual(event["total_tokens"], 15111)
+        self.assertAlmostEqual(event["cost_value"], 0.00639196)
+        self.assertEqual(event["cost_unit"], "credits")
+        self.assertEqual(event["workspace_label"], "org_123")
+        self.assertEqual(event["api_key_label"], "prod-key")
+        self.assertEqual(event["provider_name"], "Chutes")
 
     def test_redacts_account_metadata_but_keeps_token_counts(self):
         payload = log_payload(
