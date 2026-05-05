@@ -3270,8 +3270,15 @@ def ingest_openrouter_broadcast(
     con: sqlite3.Connection,
     body: bytes,
     config: AppConfig,
+    *,
+    update_existing: bool = False,
 ) -> tuple[int, int]:
-    return ingest_usage_events(con, OPENROUTER_BROADCAST_CLIENT, normalize_openrouter_broadcast(body, config))
+    return ingest_usage_events(
+        con,
+        OPENROUTER_BROADCAST_CLIENT,
+        normalize_openrouter_broadcast(body, config),
+        update_existing=update_existing,
+    )
 
 
 def replay_broadcast_payloads(
@@ -3325,7 +3332,7 @@ def replay_broadcast_payloads(
             )
             continue
         try:
-            row_accepted, row_duplicates = ingest_openrouter_broadcast(con, body, config)
+            row_accepted, row_duplicates = ingest_openrouter_broadcast(con, body, config, update_existing=True)
             accepted += row_accepted
             duplicates += row_duplicates
             con.execute(
@@ -3341,7 +3348,13 @@ def replay_broadcast_payloads(
     return {"payloads": payloads, "accepted": accepted, "duplicates": duplicates, "errors": errors}
 
 
-def ingest_usage_events(con: sqlite3.Connection, client_name: str, events: Sequence[dict[str, Any]]) -> tuple[int, int]:
+def ingest_usage_events(
+    con: sqlite3.Connection,
+    client_name: str,
+    events: Sequence[dict[str, Any]],
+    *,
+    update_existing: bool = False,
+) -> tuple[int, int]:
     accepted = 0
     duplicates = 0
     received_at = now_iso()
@@ -3385,6 +3398,57 @@ def ingest_usage_events(con: sqlite3.Connection, client_name: str, events: Seque
             )
             accepted += 1
         except sqlite3.IntegrityError:
+            if update_existing:
+                con.execute(
+                    """
+                    update usage_events
+                    set source_received_at = ?,
+                        signal = ?,
+                        event_name = ?,
+                        model = ?,
+                        session_id = ?,
+                        thread_id = ?,
+                        input_tokens = ?,
+                        output_tokens = ?,
+                        total_tokens = ?,
+                        cached_tokens = ?,
+                        reasoning_tokens = ?,
+                        source_kind = ?,
+                        trace_id = ?,
+                        span_id = ?,
+                        workspace_label = ?,
+                        api_key_label = ?,
+                        provider_name = ?,
+                        cost_value = ?,
+                        cost_unit = ?,
+                        attributes_json = ?
+                    where client_name = ? and client_event_id = ?
+                    """,
+                    (
+                        str(event.get("received_at") or received_at),
+                        str(event.get("signal") or "logs"),
+                        event.get("event_name"),
+                        event.get("model"),
+                        event.get("session_id"),
+                        event.get("thread_id"),
+                        int(event.get("input_tokens") or 0),
+                        int(event.get("output_tokens") or 0),
+                        int(event.get("total_tokens") or 0),
+                        int(event.get("cached_tokens") or 0),
+                        int(event.get("reasoning_tokens") or 0),
+                        event.get("source_kind"),
+                        event.get("trace_id"),
+                        event.get("span_id"),
+                        event.get("workspace_label"),
+                        event.get("api_key_label"),
+                        event.get("provider_name"),
+                        float(event.get("cost_value") or 0),
+                        event.get("cost_unit"),
+                        str(event.get("attributes_json") or "{}"),
+                        client_name,
+                        str(event["client_event_id"]),
+                    ),
+                )
             duplicates += 1
     con.execute("update clients set last_seen_at = ?, updated_at = ? where client_name = ?", (received_at, received_at, client_name))
     return accepted, duplicates

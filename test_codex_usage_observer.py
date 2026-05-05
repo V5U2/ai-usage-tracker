@@ -1220,16 +1220,41 @@ class ServerHttpTests(unittest.TestCase):
             con = app.connect_server(Path(tmp) / "server.sqlite")
             app.insert_broadcast_payload(con, "/v1/traces", "application/json", body, config, status="ingested")
             self.assertEqual(app.ingest_openrouter_broadcast(con, body, config), (1, 0))
+            con.execute(
+                """
+                update usage_events
+                set cost_value = 0,
+                    cost_unit = null,
+                    workspace_label = null,
+                    api_key_label = null,
+                    provider_name = null
+                where client_name = ?
+                """,
+                (app.OPENROUTER_BROADCAST_CLIENT,),
+            )
 
             result = app.replay_broadcast_payloads(con, config, replay_status="ingested")
             con.commit()
 
             row_count = con.execute("select count(*) from usage_events").fetchone()[0]
+            usage = con.execute(
+                """
+                select cost_value, cost_unit, workspace_label, api_key_label, provider_name
+                from usage_events
+                where client_name = ?
+                """,
+                (app.OPENROUTER_BROADCAST_CLIENT,),
+            ).fetchone()
             payload = con.execute("select replay_status, replayed_at, last_error from broadcast_payloads").fetchone()
             con.close()
 
             self.assertEqual(result, {"payloads": 1, "accepted": 0, "duplicates": 1, "errors": 0})
             self.assertEqual(row_count, 1)
+            self.assertAlmostEqual(usage["cost_value"], 0.0123)
+            self.assertEqual(usage["cost_unit"], "credits")
+            self.assertEqual(usage["workspace_label"], "agents")
+            self.assertEqual(usage["api_key_label"], "prod-key")
+            self.assertEqual(usage["provider_name"], "OpenAI")
             self.assertEqual(payload["replay_status"], "replayed")
             self.assertIsNotNone(payload["replayed_at"])
             self.assertIsNone(payload["last_error"])
