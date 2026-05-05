@@ -80,6 +80,13 @@ launchctl kickstart -k "gui/$(id -u)/com.example.ai-usage-tracker.receiver"
 - Default to a PR-first workflow for non-trivial changes.
 - Direct commits to `main` are the exception and should be limited to narrow, low-risk updates such as typo-only docs edits, comment-only cleanup, or tiny obvious config fixes.
 
+## Git hygiene rule
+
+- After a PR or feature branch is merged, prune completed local and remote branches that are fully merged into `main`.
+- Before deleting branches, fetch with prune, check active/open PRs, and keep any branch that is still open, unmerged, or checked out in a worktree with local changes.
+- Temporary worktrees for merged branches may be removed only after confirming they are clean.
+- Do not delete `main` or the current active PR branch.
+
 ## Release automation rule
 
 - This repo does not currently declare release automation.

@@ -187,6 +187,9 @@ estimated USD costs for known OpenAI API model names and Claude API model names:
 estimate_openai_api_costs = true
 estimate_claude_api_costs = true
 include_reasoning_tokens_as_output = true
+# Reporting-only. Stored OpenRouter rows still keep the provider-reported
+# credits unit.
+report_openrouter_credits_as_usd = false
 ```
 
 Provider-reported costs always take precedence. Estimates use the built-in
@@ -196,6 +199,12 @@ charge cached input tokens at cached-input rates, remaining input at input
 rates, and output plus reasoning tokens at output rates. Claude estimates charge
 cache read tokens at cache-hit rates, cache creation tokens at 5-minute
 cache-write rates, remaining input at input rates, and output at output rates.
+
+If your OpenRouter account treats one credit as one USD, set
+`report_openrouter_credits_as_usd = true` on the aggregation server. This only
+normalizes OpenRouter Broadcast costs while rendering reports and dashboard
+summaries; it does not rewrite stored rows or change provider-reported units in
+the raw data.
 
 ### macOS auto-start with launchd
 
@@ -820,7 +829,11 @@ are `table`, `csv`, and `json`.
 
 Report cost totals are grouped by the visible report dimensions. Rows with no
 cost or zero cost do not split otherwise matching groups, and a group only shows
-`mixed` when it contains nonzero costs in more than one unit.
+`mixed` when it contains nonzero costs in more than one unit. The web dashboard
+summary renders mixed-unit totals as a per-unit breakdown, such as
+`12.34 USD + 0.05 credits`, because those values are not additive.
+Aggregation servers with `[pricing].report_openrouter_credits_as_usd = true`
+treat OpenRouter Broadcast credit costs as USD for report aggregation only.
 
 ## Limits
 

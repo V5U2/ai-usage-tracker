@@ -3,6 +3,9 @@
 The aggregation server is the central service for multi-machine usage data. It
 accepts compact event batches from collectors, stores them in server-side
 SQLite, manages collector client tokens, and renders the `/reports` web view.
+OpenRouter credit costs can be normalized to USD for reports with
+`[pricing].report_openrouter_credits_as_usd = true`; this is reporting-only and
+does not rewrite stored provider units.
 
 Primary runtime command:
 
