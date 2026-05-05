@@ -96,6 +96,14 @@ Open the admin UI at `http://127.0.0.1:8318/admin` to create client tokens.
 Open reports at `http://127.0.0.1:8318/reports` to view usage events and token
 counts. Open tool reports at `http://127.0.0.1:8318/tools`.
 
+Report previews:
+
+![Aggregation server collector admin](../../docs/assets/aggregation-server-admin.png)
+
+![Aggregation server token usage report](../../docs/assets/aggregation-server-token-usage.png)
+
+![Aggregation server tool usage report](../../docs/assets/aggregation-server-tool-usage.png)
+
 Check status and logs:
 
 ```bash

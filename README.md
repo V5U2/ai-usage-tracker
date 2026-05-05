@@ -52,6 +52,7 @@ provider.
 - `collector.example.toml`: collector configuration example.
 - `server.example.toml`: aggregation server configuration example.
 - `docker/`, `Dockerfile`, `docker-compose.yml`: containerized server setup.
+- `docs/assets/`: screenshots and static assets used by the documentation.
 - `deploy/`: deployment scripts and detailed operations notes for Linux,
   macOS, WSL2, Unraid, Docker, Cloudflare Access, and release images.
 
@@ -141,6 +142,8 @@ Open the admin UI to create collector API tokens:
 ```text
 http://127.0.0.1:8318/admin
 ```
+
+![Aggregation server collector admin](docs/assets/aggregation-server-admin.png)
 
 New tokens are shown once. The server stores token hashes, not raw tokens. Add a
 generated token to each collector:
@@ -450,6 +453,12 @@ and model by default, with filters for date, collector, model, session, source
 kind, workspace, API key, model provider, grouping, and row limit. Open `/tools`
 to view captured tool calls grouped by collector and tool. The web UI keeps UTC
 timestamps in page data and displays them in the browser's local time zone.
+
+Report previews:
+
+![Aggregation server token usage report](docs/assets/aggregation-server-token-usage.png)
+
+![Aggregation server tool usage report](docs/assets/aggregation-server-tool-usage.png)
 
 Backfill server-side estimated costs:
 
