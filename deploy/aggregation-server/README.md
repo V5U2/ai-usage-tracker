@@ -24,10 +24,13 @@ sudo chown -R root:root /opt/ai-usage-tracker /etc/ai-usage-tracker
 sudo chown -R ai-usage-tracker:ai-usage-tracker /var/lib/ai-usage-tracker
 ```
 
-Edit `/etc/ai-usage-tracker/server.toml` before starting the service. At
-minimum, set a strong `[aggregation_server].admin_api_key` if you will use the
-report APIs, and configure `[openrouter_broadcast]` only when OpenRouter should
-send traces directly to the server.
+Edit `/etc/ai-usage-tracker/server.toml` before starting the service. Configure
+`[web_auth]` if you want built-in web login instead of relying on loopback, a
+VPN, Cloudflare Access, Authentik, or another authenticated proxy. Set
+`[aggregation_server].admin_api_key` only when you need a static legacy report
+API key before creating managed admin API keys in the web UI. Configure
+`[openrouter_broadcast]` only when OpenRouter should send traces directly to the
+server.
 
 Create `/etc/systemd/system/ai-usage-tracker-server.service`:
 
@@ -95,6 +98,14 @@ docker compose up -d --build
 Open the admin UI at `http://127.0.0.1:8318/admin` to create client tokens.
 Open reports at `http://127.0.0.1:8318/reports` to view usage events and token
 counts. Open tool reports at `http://127.0.0.1:8318/tools`.
+
+The default container config uses `[web_auth].mode = "none"`. Edit the persisted
+`/data/server.toml` to switch to `password` or `oidc` before exposing the web UI
+without an external auth layer. Generate password hashes with:
+
+```bash
+docker exec ai-usage-tracker-server python ai_usage_tracker.py server hash-password 'your-password'
+```
 
 Report previews:
 
@@ -199,6 +210,10 @@ UI protected with your identity provider and use a Cloudflare Access service
 token for headless collectors. The collector still sends the app-level
 `api_key` as `Authorization: Bearer ...`; the Cloudflare service token only
 gets the request through Cloudflare Access.
+
+If Cloudflare Access or Authentik handles browser login, leave
+`[web_auth].mode = "none"` so there is only one browser login layer. Use built-in
+`password` or `oidc` mode when the app itself should enforce browser login.
 
 Create a Cloudflare Access service token for collectors, add a Service Auth
 policy for the aggregation app or at least `/api/v1/usage-events`, then configure

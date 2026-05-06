@@ -10,9 +10,11 @@ Use provider-native OTEL JSON or Broadcast payloads for best results.
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import datetime as dt
 import hashlib
+import hmac
 import html
 import json
 import os
@@ -299,6 +301,22 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
+class WebAuthConfig:
+    mode: str = "none"
+    session_secret: str | None = None
+    session_ttl_seconds: int = 12 * 60 * 60
+    username: str | None = None
+    password_hash: str | None = None
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_client_secret: str | None = None
+    oidc_redirect_url: str | None = None
+    oidc_scopes: tuple[str, ...] = ("openid", "email", "profile")
+    oidc_allowed_email: str | None = None
+    oidc_allowed_subject: str | None = None
+
+
+@dataclass(frozen=True)
 class OpenRouterBroadcastConfig:
     enabled: bool = False
     api_key: str | None = None
@@ -321,6 +339,7 @@ class AppConfig:
     storage: StorageConfig = field(default_factory=StorageConfig)
     server: RemoteServerConfig = field(default_factory=RemoteServerConfig)
     central: ServerConfig = field(default_factory=ServerConfig)
+    web_auth: WebAuthConfig = field(default_factory=WebAuthConfig)
     openrouter_broadcast: OpenRouterBroadcastConfig = field(default_factory=OpenRouterBroadcastConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
     redaction_keys: frozenset[str] = frozenset(SENSITIVE_ATTR_KEYS)
@@ -479,6 +498,7 @@ def load_config(path: Path | None) -> AppConfig:
     storage_data = table_config(data, "storage")
     collector_data = merged_table_config(data, "server", "collector")
     aggregation_data = merged_table_config(data, "central_server", "aggregation_server")
+    web_auth_data = table_config(data, "web_auth")
     openrouter_data = table_config(data, "openrouter_broadcast")
     pricing_data = table_config(data, "pricing")
     redaction_data = table_config(data, "redaction")
@@ -509,6 +529,30 @@ def load_config(path: Path | None) -> AppConfig:
         port=int_config(aggregation_data, "port", 8318),
         db=str_config(aggregation_data, "db", str(DEFAULT_SERVER_DB)),
     )
+    web_auth_mode = str_config(web_auth_data, "mode", "none")
+    if web_auth_mode not in ("none", "password", "oidc"):
+        raise ValueError('web_auth.mode must be "none", "password", or "oidc"')
+    raw_scopes = web_auth_data.get("oidc_scopes", ["openid", "email", "profile"])
+    if isinstance(raw_scopes, str):
+        oidc_scopes = tuple(part for part in raw_scopes.split() if part)
+    elif isinstance(raw_scopes, list):
+        oidc_scopes = tuple(str(part) for part in raw_scopes if str(part))
+    else:
+        raise ValueError("web_auth.oidc_scopes must be a string or list")
+    web_auth = WebAuthConfig(
+        mode=web_auth_mode,
+        session_secret=optional_str_config(web_auth_data, "session_secret"),
+        session_ttl_seconds=int_config(web_auth_data, "session_ttl_seconds", 12 * 60 * 60),
+        username=optional_str_config(web_auth_data, "username"),
+        password_hash=optional_str_config(web_auth_data, "password_hash"),
+        oidc_issuer=optional_str_config(web_auth_data, "oidc_issuer"),
+        oidc_client_id=optional_str_config(web_auth_data, "oidc_client_id"),
+        oidc_client_secret=optional_str_config(web_auth_data, "oidc_client_secret"),
+        oidc_redirect_url=optional_str_config(web_auth_data, "oidc_redirect_url"),
+        oidc_scopes=oidc_scopes,
+        oidc_allowed_email=optional_str_config(web_auth_data, "oidc_allowed_email"),
+        oidc_allowed_subject=optional_str_config(web_auth_data, "oidc_allowed_subject"),
+    )
     openrouter_broadcast = OpenRouterBroadcastConfig(
         enabled=bool_config(openrouter_data, "enabled", False),
         api_key=optional_str_config(openrouter_data, "api_key"),
@@ -527,6 +571,7 @@ def load_config(path: Path | None) -> AppConfig:
         storage=storage,
         server=remote_server,
         central=central,
+        web_auth=web_auth,
         openrouter_broadcast=openrouter_broadcast,
         pricing=pricing,
         redaction_keys=frozenset(key.lower() for key in list_config(redaction_data, "keys", SENSITIVE_ATTR_KEYS)),
@@ -685,6 +730,20 @@ def connect_server(db_path: Path) -> sqlite3.Connection:
         create table if not exists clients (
             id integer primary key autoincrement,
             client_name text not null unique,
+            display_name text not null,
+            token_hash text not null,
+            created_at text not null,
+            updated_at text not null,
+            revoked_at text,
+            last_seen_at text
+        )
+        """
+    )
+    con.execute(
+        """
+        create table if not exists admin_api_keys (
+            id integer primary key autoincrement,
+            key_name text not null unique,
             display_name text not null,
             token_hash text not null,
             created_at text not null,
@@ -2055,7 +2114,7 @@ def print_table(rows: Sequence[sqlite3.Row], columns: Sequence[str] = REPORT_COL
         print("  ".join(cells))
 
 
-def server_nav(active: str) -> str:
+def server_nav(active: str, *, show_logout: bool = False) -> str:
     items = (
         ("dashboard", "/dashboard", "Dashboard"),
         ("usage", "/reports", "Token Usage"),
@@ -2066,6 +2125,7 @@ def server_nav(active: str) -> str:
         active_attr = ' class="active"' if key == active else ""
         links.append(f'<a href="{href}"{active_attr}>{label}</a>')
     admin_attr = ' class="active"' if active == "admin" else ""
+    logout_link = '<a href="/auth/logout">Logout</a>' if show_logout else ""
     return (
         "<nav>"
         f'<div class="nav-primary">{"".join(links)}</div>'
@@ -2073,6 +2133,7 @@ def server_nav(active: str) -> str:
         '<button type="button" class="theme-toggle" title="Toggle dark mode" '
         'aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button>'
         f'<a href="/admin"{admin_attr}>Admin</a>'
+        f"{logout_link}"
         "</div>"
         "</nav>"
     )
@@ -2468,7 +2529,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
             value = getattr(args, name)
             return html.escape(str(value or ""))
 
-        nav = server_nav("usage")
+        nav = server_nav("usage", show_logout=web_auth_enabled(app_config))
         styles = server_page_styles()
         theme_script = server_theme_script()
         favicon = server_favicon_link()
@@ -2554,7 +2615,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 "</table></div>"
             )
 
-        nav = server_nav("dashboard")
+        nav = server_nav("dashboard", show_logout=web_auth_enabled(app_config))
         styles = server_page_styles()
         theme_script = server_theme_script()
         favicon = server_favicon_link()
@@ -2653,7 +2714,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
             value = getattr(args, name)
             return html.escape(str(value or ""))
 
-        nav = server_nav("tools")
+        nav = server_nav("tools", show_logout=web_auth_enabled(getattr(self, "app_config", DEFAULT_APP_CONFIG)))
         styles = server_page_styles(tools=True)
         theme_script = server_theme_script()
         favicon = server_favicon_link()
@@ -2727,6 +2788,13 @@ class ServerReceiver(BaseHTTPRequestHandler):
             order by revoked_at is not null, client_name
             """
         ).fetchall()
+        admin_keys = con.execute(
+            """
+            select key_name, display_name, created_at, updated_at, revoked_at, last_seen_at
+            from admin_api_keys
+            order by revoked_at is not null, key_name
+            """
+        ).fetchall()
         rows = []
         for client in clients:
             client_name = html.escape(client["client_name"])
@@ -2772,6 +2840,51 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 </tr>
                 """
             )
+        admin_key_rows = []
+        for api_key in admin_keys:
+            key_name = html.escape(api_key["key_name"])
+            display_name = html.escape(api_key["display_name"])
+            status = "revoked" if api_key["revoked_at"] else "active"
+            revoke_button = (
+                ""
+                if api_key["revoked_at"]
+                else f"""
+                <form method="post" action="/admin/api-keys/revoke" class="inline">
+                  <input type="hidden" name="key_name" value="{key_name}">
+                  <button type="submit">Revoke</button>
+                </form>
+                """
+            )
+            delete_button = (
+                f"""
+                <form method="post" action="/admin/api-keys/delete" class="inline">
+                  <input type="hidden" name="key_name" value="{key_name}">
+                  <button type="submit">Delete</button>
+                </form>
+                """
+                if api_key["revoked_at"]
+                else ""
+            )
+            admin_key_rows.append(
+                f"""
+                <tr>
+                  <td>{key_name}</td>
+                  <td>
+                    <form method="post" action="/admin/api-keys/rename" class="inline">
+                      <input type="hidden" name="key_name" value="{key_name}">
+                      <input name="display_name" value="{display_name}">
+                      <button type="submit">Rename</button>
+                    </form>
+                  </td>
+                  <td>{status}</td>
+                  {server_html_cell("created_at", api_key["created_at"])}
+                  {server_html_cell("updated_at", api_key["updated_at"])}
+                  {server_html_cell("last_seen", api_key["last_seen_at"])}
+                  {server_html_cell("revoked_at", api_key["revoked_at"])}
+                  <td>{revoke_button}{delete_button}</td>
+                </tr>
+                """
+            )
         token_block = ""
         if token:
             token_block = f"""
@@ -2803,7 +2916,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 f'<div class="value">{html.escape(value)}</div></div>'
             )
 
-        nav = server_nav("admin")
+        nav = server_nav("admin", show_logout=web_auth_enabled(app_config))
         styles = server_page_styles(admin=True)
         theme_script = server_theme_script()
         favicon = server_favicon_link()
@@ -2842,6 +2955,23 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </form>
     </section>
     <section class="panel">
+      <h2>Create Admin API Key</h2>
+      <form method="post" action="/admin/api-keys/create" class="filters">
+        <label>Key name <input name="key_name" required pattern="[A-Za-z0-9_.-]+"></label>
+        <label>Display name <input name="display_name"></label>
+        <button type="submit">Create key</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Admin API Keys</h2>
+      <table>
+        <thead>
+          <tr><th>Key</th><th>Display name</th><th>Status</th><th>Created</th><th>Updated</th><th>Last seen</th><th>Revoked</th><th>Actions</th></tr>
+        </thead>
+        <tbody>{''.join(admin_key_rows) or '<tr><td colspan="8">No admin API keys yet.</td></tr>'}</tbody>
+      </table>
+    </section>
+    <section class="panel">
       <h2>Collectors</h2>
       <table>
         <thead>
@@ -2855,12 +2985,116 @@ class ServerReceiver(BaseHTTPRequestHandler):
 </body>
 </html>"""
 
+    def send_redirect_with_cookie(self, location: str, cookie: str | None = None) -> None:
+        self.send_response(303)
+        self.send_header("location", location)
+        if cookie:
+            self.send_header("set-cookie", cookie)
+        self.end_headers()
+
+    def send_login_page(self, *, message: str | None = None, next_path: str = "/dashboard") -> None:
+        config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
+        styles = server_page_styles()
+        theme_script = server_theme_script()
+        favicon = server_favicon_link()
+        next_value = html.escape(next_path or "/dashboard", quote=True)
+        message_block = f'<section class="notice">{html.escape(message)}</section>' if message else ""
+        password_block = ""
+        oidc_block = ""
+        if config.web_auth.mode == "password":
+            password_block = f"""
+            <form method="post" action="/auth/login" class="filters">
+              <input type="hidden" name="next" value="{next_value}">
+              <label>Username <input name="username" autocomplete="username" required></label>
+              <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+              <button type="submit">Sign in</button>
+            </form>
+            """
+        if config.web_auth.mode == "oidc":
+            oidc_block = f"""
+            <form method="post" action="/auth/login" class="filters">
+              <input type="hidden" name="next" value="{next_value}">
+              <button type="submit">Sign in with OIDC</button>
+            </form>
+            """
+        if not web_auth_configured(config):
+            message_block = '<section class="notice">Web authentication is enabled but not fully configured.</section>'
+        body = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  {server_viewport_meta()}
+  <title>AI Usage Tracker Sign In</title>
+  {favicon}
+  <script>{theme_script}</script>
+  <style>{styles}</style>
+</head>
+<body>
+  <main>
+    <h1>Sign In</h1>
+    {message_block}
+    {password_block}
+    {oidc_block}
+  </main>
+  {server_footer()}
+</body>
+</html>"""
+        self.send_html(200, body)
+
+    def require_web_auth(self, path: str) -> bool:
+        config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
+        if not web_auth_enabled(config):
+            return True
+        if web_user_from_headers(config, self.headers):
+            return True
+        self.send_redirect_with_cookie(f"/auth/login?next={parse.quote(path or '/dashboard')}")
+        return False
+
+    def set_session_and_redirect(self, user: str, method: str, next_path: str) -> None:
+        config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
+        token = make_signed_cookie(config, web_session_payload(config, user, method))
+        cookie = (
+            f"ait_session={token}; Path=/; HttpOnly; SameSite=Lax; "
+            f"Max-Age={max(config.web_auth.session_ttl_seconds, 60)}"
+        )
+        destination = next_path if next_path.startswith("/") and not next_path.startswith("//") else "/dashboard"
+        self.send_redirect_with_cookie(destination, cookie)
+
+    def expire_session_and_redirect(self) -> None:
+        self.send_redirect_with_cookie(
+            "/auth/login",
+            "ait_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        )
+
     def do_GET(self) -> None:
         parsed = parse.urlparse(self.path)
         if parsed.path in ("", "/"):
             self.redirect("/dashboard")
             return
         query = parse.parse_qs(parsed.query, keep_blank_values=True)
+        if parsed.path == "/auth/login":
+            self.send_login_page(message=query.get("message", [None])[0], next_path=query.get("next", ["/dashboard"])[0])
+            return
+        if parsed.path == "/auth/logout":
+            self.expire_session_and_redirect()
+            return
+        if parsed.path == "/auth/oidc/callback":
+            config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
+            state_cookie = read_signed_cookie(config, cookie_values(self.headers).get("ait_oidc_state"))
+            state = query.get("state", [""])[0]
+            code = query.get("code", [""])[0]
+            if not state_cookie or state_cookie.get("state") != state or not code:
+                self.send_login_page(message="Invalid OIDC callback.", next_path="/dashboard")
+                return
+            try:
+                userinfo = oidc_exchange_code(config, self.headers, code)
+                user = str(userinfo.get("email") or userinfo.get("preferred_username") or userinfo.get("sub") or "oidc-user")
+                self.set_session_and_redirect(user, "oidc", str(state_cookie.get("next") or "/dashboard"))
+            except Exception as exc:
+                self.send_login_page(message=f"OIDC sign in failed: {exc}", next_path="/dashboard")
+            return
+        if parsed.path in ("/dashboard", "/admin", "/reports", "/tools") and not self.require_web_auth(parsed.path):
+            return
         con = connect_server(self.db_path)
         try:
             if parsed.path == "/dashboard":
@@ -2877,13 +3111,13 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 self.send_html(200, self.render_tool_reports(con, query))
                 return
             if parsed.path == "/api/v1/stats":
-                if not require_admin(self.app_config, self.headers):
+                if not require_admin(self.app_config, self.headers, con):
                     self.send_json(401, {"error": "admin authorization required"})
                     return
                 self.send_json(200, server_stats_dict(con, self.app_config))
                 return
             if parsed.path == "/api/v1/reports/usage":
-                if not require_admin(self.app_config, self.headers):
+                if not require_admin(self.app_config, self.headers, con):
                     self.send_json(401, {"error": "admin authorization required"})
                     return
                 args = self.reports_args(query)
@@ -2891,7 +3125,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 self.send_json(200, {"rows": rows})
                 return
             if parsed.path == "/api/v1/reports/tools":
-                if not require_admin(self.app_config, self.headers):
+                if not require_admin(self.app_config, self.headers, con):
                     self.send_json(401, {"error": "admin authorization required"})
                     return
                 args = self.tool_reports_args(query)
@@ -2904,6 +3138,43 @@ class ServerReceiver(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = parse.urlparse(self.path)
+        if parsed.path == "/auth/login":
+            config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
+            form = self.read_form()
+            next_path = form.get("next", "/dashboard")
+            if not web_auth_configured(config):
+                self.send_login_page(message="Web authentication is not fully configured.", next_path=next_path)
+                return
+            if config.web_auth.mode == "password":
+                username = form.get("username", "")
+                password = form.get("password", "")
+                if username == config.web_auth.username and verify_password(password, config.web_auth.password_hash):
+                    self.set_session_and_redirect(username, "password", next_path)
+                    return
+                self.send_login_page(message="Invalid username or password.", next_path=next_path)
+                return
+            if config.web_auth.mode == "oidc":
+                state = secrets.token_urlsafe(24)
+                nonce = secrets.token_urlsafe(24)
+                try:
+                    location = oidc_authorization_url(config, self.headers, state, nonce)
+                    token = make_signed_cookie(
+                        config,
+                        {
+                            "state": state,
+                            "nonce": nonce,
+                            "next": next_path if next_path.startswith("/") and not next_path.startswith("//") else "/dashboard",
+                            "iat": int(time.time()),
+                            "exp": int(time.time()) + 600,
+                        },
+                    )
+                except Exception as exc:
+                    self.send_login_page(message=f"OIDC sign in failed: {exc}", next_path=next_path)
+                    return
+                self.send_redirect_with_cookie(location, f"ait_oidc_state={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600")
+                return
+            self.redirect("/dashboard")
+            return
         con = connect_server(self.db_path)
         try:
             if parsed.path == "/v1/traces":
@@ -2980,6 +3251,8 @@ class ServerReceiver(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if parsed.path.startswith("/admin/") and not self.require_web_auth("/admin"):
+                return
             if parsed.path == "/admin/clients/create":
                 form = self.read_form()
                 client_name = form.get("client_name", "").strip()
@@ -3019,6 +3292,55 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 deleted = delete_revoked_client(con, form.get("client_name", ""))
                 con.commit()
                 message = "Revoked%20client%20deleted" if deleted else "Only%20revoked%20clients%20can%20be%20deleted"
+                self.redirect(f"/admin?message={message}")
+                return
+            if parsed.path == "/admin/api-keys/create":
+                form = self.read_form()
+                key_name = form.get("key_name", "").strip()
+                display_name = form.get("display_name", "").strip() or key_name
+                if not key_name:
+                    self.send_html(400, self.render_admin(con, message="Key name is required."))
+                    return
+                try:
+                    token = create_admin_api_key(con, key_name, display_name)
+                    con.commit()
+                except ValueError as exc:
+                    self.send_html(400, self.render_admin(con, message=str(exc)))
+                    return
+                except sqlite3.IntegrityError:
+                    self.send_html(409, self.render_admin(con, message=f"Admin API key {key_name} already exists."))
+                    return
+                self.send_html(200, self.render_admin(con, message=f"Created admin API key {key_name}.", token=token))
+                return
+            if parsed.path == "/admin/api-keys/rename":
+                form = self.read_form()
+                try:
+                    rename_admin_api_key(con, form.get("key_name", ""), form.get("display_name", "").strip())
+                    con.commit()
+                except ValueError as exc:
+                    self.send_html(400, self.render_admin(con, message=str(exc)))
+                    return
+                self.redirect("/admin?message=Admin%20API%20key%20renamed")
+                return
+            if parsed.path == "/admin/api-keys/revoke":
+                form = self.read_form()
+                try:
+                    revoke_admin_api_key(con, form.get("key_name", ""))
+                    con.commit()
+                except ValueError as exc:
+                    self.send_html(400, self.render_admin(con, message=str(exc)))
+                    return
+                self.redirect("/admin?message=Admin%20API%20key%20revoked")
+                return
+            if parsed.path == "/admin/api-keys/delete":
+                form = self.read_form()
+                try:
+                    deleted = delete_revoked_admin_api_key(con, form.get("key_name", ""))
+                    con.commit()
+                except ValueError as exc:
+                    self.send_html(400, self.render_admin(con, message=str(exc)))
+                    return
+                message = "Revoked%20admin%20API%20key%20deleted" if deleted else "Only%20revoked%20admin%20API%20keys%20can%20be%20deleted"
                 self.redirect(f"/admin?message={message}")
                 return
             self.send_json(404, {"error": "not found"})
@@ -3069,7 +3391,7 @@ def server_serve(args: argparse.Namespace) -> None:
     if host not in ("127.0.0.1", "localhost", "::1") and not args.allow_remote:
         print(
             "Refusing to bind outside loopback without --allow-remote. "
-            "The admin UI has no login in the MVP.",
+            "Use --allow-remote only on a trusted network or behind authentication.",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -3646,9 +3968,19 @@ def generate_token() -> str:
     return "ait_" + secrets.token_urlsafe(32)
 
 
+def generate_admin_token() -> str:
+    return "ait_admin_" + secrets.token_urlsafe(32)
+
+
+def validate_key_name(key_name: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", key_name or ""):
+        raise ValueError("Key name must contain only letters, numbers, underscore, dot, or dash.")
+
+
 def validate_client_name(client_name: str) -> None:
     if client_name == OPENROUTER_BROADCAST_CLIENT:
         raise ValueError(f"{OPENROUTER_BROADCAST_CLIENT} is reserved for OpenRouter Broadcast ingestion")
+    validate_key_name(client_name)
 
 
 def ensure_no_openrouter_client_conflict(con: sqlite3.Connection) -> None:
@@ -3711,6 +4043,46 @@ def delete_revoked_client(con: sqlite3.Connection, client_name: str) -> bool:
     return cursor.rowcount > 0
 
 
+def create_admin_api_key(con: sqlite3.Connection, key_name: str, display_name: str) -> str:
+    validate_key_name(key_name)
+    token = generate_admin_token()
+    now = now_iso()
+    con.execute(
+        """
+        insert into admin_api_keys(key_name, display_name, token_hash, created_at, updated_at)
+        values (?, ?, ?, ?, ?)
+        """,
+        (key_name, display_name or key_name, hash_token(token), now, now),
+    )
+    return token
+
+
+def rename_admin_api_key(con: sqlite3.Connection, key_name: str, display_name: str) -> None:
+    validate_key_name(key_name)
+    con.execute(
+        "update admin_api_keys set display_name = ?, updated_at = ? where key_name = ?",
+        (display_name, now_iso(), key_name),
+    )
+
+
+def revoke_admin_api_key(con: sqlite3.Connection, key_name: str) -> None:
+    validate_key_name(key_name)
+    now = now_iso()
+    con.execute(
+        "update admin_api_keys set revoked_at = coalesce(revoked_at, ?), updated_at = ? where key_name = ?",
+        (now, now, key_name),
+    )
+
+
+def delete_revoked_admin_api_key(con: sqlite3.Connection, key_name: str) -> bool:
+    validate_key_name(key_name)
+    cursor = con.execute(
+        "delete from admin_api_keys where key_name = ? and revoked_at is not null",
+        (key_name,),
+    )
+    return cursor.rowcount > 0
+
+
 def bearer_token(headers: Any) -> str | None:
     value = headers.get("authorization") or headers.get("Authorization")
     if not value or not value.lower().startswith("bearer "):
@@ -3730,10 +4102,31 @@ def authenticate_client(con: sqlite3.Connection, client_name: str, token: str | 
     return secrets.compare_digest(row["token_hash"], hash_token(token))
 
 
-def require_admin(config: AppConfig, headers: Any) -> bool:
-    if not config.central.admin_api_key:
+def authenticate_admin_api_key(con: sqlite3.Connection, token: str | None) -> bool:
+    if not token:
         return False
-    return secrets.compare_digest(bearer_token(headers) or "", config.central.admin_api_key)
+    token_hash = hash_token(token)
+    row = con.execute(
+        """
+        select key_name
+        from admin_api_keys
+        where token_hash = ? and revoked_at is null
+        """,
+        (token_hash,),
+    ).fetchone()
+    if not row:
+        return False
+    now = now_iso()
+    con.execute("update admin_api_keys set last_seen_at = ?, updated_at = ? where key_name = ?", (now, now, row["key_name"]))
+    con.commit()
+    return True
+
+
+def require_admin(config: AppConfig, headers: Any, con: sqlite3.Connection | None = None) -> bool:
+    token = bearer_token(headers)
+    if config.central.admin_api_key and secrets.compare_digest(token or "", config.central.admin_api_key):
+        return True
+    return authenticate_admin_api_key(con, token) if con is not None else False
 
 
 def require_openrouter_broadcast(config: AppConfig, headers: Any) -> bool:
@@ -3749,6 +4142,187 @@ def require_openrouter_broadcast(config: AppConfig, headers: Any) -> bool:
         if not secrets.compare_digest(value or "", broadcast.required_header_value):
             return False
     return True
+
+
+def b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def b64url_decode(data: str) -> bytes:
+    padded = data + ("=" * (-len(data) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def password_hash(password: str, *, iterations: int = 260_000) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${b64url_encode(salt)}${b64url_encode(digest)}"
+
+
+def verify_password(password: str, stored_hash: str | None) -> bool:
+    if not stored_hash:
+        return False
+    parts = stored_hash.split("$")
+    if len(parts) != 4 or parts[0] != "pbkdf2_sha256":
+        return False
+    try:
+        iterations = int(parts[1])
+        salt = b64url_decode(parts[2])
+        expected = b64url_decode(parts[3])
+    except Exception:
+        return False
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return secrets.compare_digest(actual, expected)
+
+
+def cookie_values(headers: Any) -> dict[str, str]:
+    raw = headers.get("cookie") or headers.get("Cookie") or ""
+    values: dict[str, str] = {}
+    for part in raw.split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        values[name.strip()] = value.strip()
+    return values
+
+
+def sign_bytes(secret: str, data: bytes) -> str:
+    return hmac.new(secret.encode("utf-8"), data, hashlib.sha256).hexdigest()
+
+
+def make_signed_cookie(config: AppConfig, payload: Mapping[str, Any]) -> str:
+    secret = config.web_auth.session_secret
+    if not secret:
+        raise ValueError("web_auth.session_secret is required")
+    body = b64url_encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    signature = sign_bytes(secret, body.encode("ascii"))
+    return f"{body}.{signature}"
+
+
+def read_signed_cookie(config: AppConfig, token: str | None) -> dict[str, Any] | None:
+    secret = config.web_auth.session_secret
+    if not secret or not token or "." not in token:
+        return None
+    body, signature = token.rsplit(".", 1)
+    expected = sign_bytes(secret, body.encode("ascii"))
+    if not secrets.compare_digest(signature, expected):
+        return None
+    try:
+        payload = json.loads(b64url_decode(body).decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    expires_at = payload.get("exp")
+    if not isinstance(expires_at, int) or expires_at < int(time.time()):
+        return None
+    return payload
+
+
+def web_auth_enabled(config: AppConfig) -> bool:
+    return config.web_auth.mode != "none"
+
+
+def web_auth_configured(config: AppConfig) -> bool:
+    auth = config.web_auth
+    if auth.mode == "none":
+        return True
+    if not auth.session_secret:
+        return False
+    if auth.mode == "password":
+        return bool(auth.username and auth.password_hash)
+    if auth.mode == "oidc":
+        return bool(auth.oidc_issuer and auth.oidc_client_id and auth.oidc_client_secret)
+    return False
+
+
+def web_session_payload(config: AppConfig, user: str, method: str) -> dict[str, Any]:
+    now = int(time.time())
+    return {"user": user, "method": method, "iat": now, "exp": now + max(config.web_auth.session_ttl_seconds, 60)}
+
+
+def web_user_from_headers(config: AppConfig, headers: Any) -> str | None:
+    if not web_auth_enabled(config):
+        return "anonymous"
+    payload = read_signed_cookie(config, cookie_values(headers).get("ait_session"))
+    user = payload.get("user") if payload else None
+    return str(user) if user else None
+
+
+def oidc_discovery(config: AppConfig) -> dict[str, Any]:
+    issuer = (config.web_auth.oidc_issuer or "").rstrip("/")
+    if not issuer:
+        raise ValueError("web_auth.oidc_issuer is required")
+    with request.urlopen(f"{issuer}/.well-known/openid-configuration", timeout=10) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("OIDC discovery document must be an object")
+    return payload
+
+
+def oidc_redirect_uri(config: AppConfig, headers: Any) -> str:
+    if config.web_auth.oidc_redirect_url:
+        return config.web_auth.oidc_redirect_url
+    proto = headers.get("x-forwarded-proto") or headers.get("X-Forwarded-Proto") or "http"
+    host = headers.get("x-forwarded-host") or headers.get("X-Forwarded-Host") or headers.get("host") or headers.get("Host")
+    if not host:
+        raise ValueError("Host header is required to build OIDC redirect URL")
+    return f"{proto}://{host}/auth/oidc/callback"
+
+
+def oidc_authorization_url(config: AppConfig, headers: Any, state: str, nonce: str) -> str:
+    discovery = oidc_discovery(config)
+    endpoint = discovery.get("authorization_endpoint")
+    if not endpoint:
+        raise ValueError("OIDC discovery document has no authorization_endpoint")
+    query = parse.urlencode(
+        {
+            "client_id": config.web_auth.oidc_client_id,
+            "redirect_uri": oidc_redirect_uri(config, headers),
+            "response_type": "code",
+            "scope": " ".join(config.web_auth.oidc_scopes),
+            "state": state,
+            "nonce": nonce,
+        }
+    )
+    return f"{endpoint}?{query}"
+
+
+def oidc_exchange_code(config: AppConfig, headers: Any, code: str) -> dict[str, Any]:
+    discovery = oidc_discovery(config)
+    token_endpoint = discovery.get("token_endpoint")
+    userinfo_endpoint = discovery.get("userinfo_endpoint")
+    if not token_endpoint or not userinfo_endpoint:
+        raise ValueError("OIDC discovery document must include token_endpoint and userinfo_endpoint")
+    form = parse.urlencode(
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": oidc_redirect_uri(config, headers),
+            "client_id": config.web_auth.oidc_client_id,
+            "client_secret": config.web_auth.oidc_client_secret,
+        }
+    ).encode("utf-8")
+    token_request = request.Request(token_endpoint, data=form, headers={"content-type": "application/x-www-form-urlencoded"})
+    with request.urlopen(token_request, timeout=10) as response:
+        token_payload = json.loads(response.read().decode("utf-8"))
+    access_token = token_payload.get("access_token") if isinstance(token_payload, dict) else None
+    if not access_token:
+        raise ValueError("OIDC token response did not include access_token")
+    userinfo_request = request.Request(userinfo_endpoint, headers={"authorization": f"Bearer {access_token}"})
+    with request.urlopen(userinfo_request, timeout=10) as response:
+        userinfo = json.loads(response.read().decode("utf-8"))
+    if not isinstance(userinfo, dict):
+        raise ValueError("OIDC userinfo response must be an object")
+    allowed_subject = config.web_auth.oidc_allowed_subject
+    allowed_email = config.web_auth.oidc_allowed_email
+    subject = str(userinfo.get("sub") or "")
+    email = str(userinfo.get("email") or "")
+    if allowed_subject and subject != allowed_subject:
+        raise ValueError("OIDC subject is not allowed")
+    if allowed_email and email.lower() != allowed_email.lower():
+        raise ValueError("OIDC email is not allowed")
+    return userinfo
 
 
 def insert_broadcast_payload(
@@ -4632,6 +5206,10 @@ def version(args: argparse.Namespace) -> None:
     print(version_text())
 
 
+def hash_password_command(args: argparse.Namespace) -> None:
+    print(password_hash(args.password))
+
+
 def add_report_filters(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--since", help="UTC timestamp or YYYY-MM-DD lower bound")
     parser.add_argument("--until", help="UTC timestamp or YYYY-MM-DD upper bound")
@@ -4812,6 +5390,10 @@ def main() -> int:
     p_server_backfill_costs = server_sub.add_parser("backfill-costs", parents=[db_parent])
     p_server_backfill_costs.add_argument("--server-db")
     p_server_backfill_costs.set_defaults(func=backfill_costs)
+
+    p_server_hash_password = server_sub.add_parser("hash-password", help="Hash a single-user web password")
+    p_server_hash_password.add_argument("password")
+    p_server_hash_password.set_defaults(func=hash_password_command)
 
     p_server_version = server_sub.add_parser("version")
     p_server_version.set_defaults(func=version)

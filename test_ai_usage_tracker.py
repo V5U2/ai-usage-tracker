@@ -8,6 +8,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+from urllib import parse
 
 import ai_usage_tracker as app
 import ai_usage_tracker.aggregation_server as aggregation_server
@@ -840,6 +841,28 @@ report_openrouter_credits_as_usd = true
             self.assertFalse(config.pricing.include_reasoning_tokens_as_output)
             self.assertTrue(config.pricing.report_openrouter_credits_as_usd)
 
+    def test_load_config_reads_web_auth_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[web_auth]
+mode = "password"
+session_secret = "dev-session-secret"
+username = "admin"
+password_hash = "pbkdf2_sha256$1$c2FsdA$hash"
+session_ttl_seconds = 3600
+""",
+                encoding="utf-8",
+            )
+
+            config = app.load_config(config_path)
+
+            self.assertEqual(config.web_auth.mode, "password")
+            self.assertEqual(config.web_auth.session_secret, "dev-session-secret")
+            self.assertEqual(config.web_auth.username, "admin")
+            self.assertEqual(config.web_auth.session_ttl_seconds, 3600)
+
     def test_load_config_keeps_legacy_server_section_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
@@ -1663,6 +1686,37 @@ class ClientSyncTests(unittest.TestCase):
 
 
 class ServerHttpTests(unittest.TestCase):
+    def run_server_request(
+        self,
+        db: Path,
+        method: str,
+        path: str,
+        *,
+        config=None,
+        body: bytes = b"",
+        headers: dict[str, str] | None = None,
+    ):
+        handler = object.__new__(app.ServerReceiver)
+        handler.db_path = db
+        handler.app_config = config or app.AppConfig()
+        handler.path = path
+        handler.headers = {
+            "content-length": str(len(body)),
+            **(headers or {}),
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.wfile = io.BytesIO()
+        responses: list[int] = []
+        sent_headers: list[tuple[str, str]] = []
+        handler.send_response = responses.append
+        handler.send_header = lambda key, value: sent_headers.append((key.lower(), value))
+        handler.end_headers = lambda: None
+        if method == "GET":
+            handler.do_GET()
+        else:
+            handler.do_POST()
+        return responses, sent_headers, handler.wfile.getvalue().decode("utf-8")
+
     def assertSharedNav(self, body, active):
         expected = {
             "dashboard": '<nav><div class="nav-primary"><a href="/dashboard" class="active">Dashboard</a><a href="/reports">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
@@ -3070,6 +3124,108 @@ class ServerHttpTests(unittest.TestCase):
             self.assertEqual(row["display_name"], "Work Laptop")
             self.assertIsNotNone(row["revoked_at"])
             con.close()
+
+    def test_admin_api_keys_can_be_managed_and_authenticate_report_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            con = app.connect_server(db)
+            token = app.create_admin_api_key(con, "grafana", "Grafana")
+            con.commit()
+
+            body = app.ServerReceiver.render_admin(object(), con, token=token)
+            self.assertIn("Admin API Keys", body)
+            self.assertIn("Grafana", body)
+            self.assertIn(token, body)
+            self.assertTrue(app.require_admin(app.AppConfig(), {"authorization": f"Bearer {token}"}, con))
+
+            row = con.execute("select token_hash, revoked_at from admin_api_keys where key_name = 'grafana'").fetchone()
+            self.assertEqual(row["token_hash"], app.hash_token(token))
+            self.assertIsNone(row["revoked_at"])
+
+            app.rename_admin_api_key(con, "grafana", "Grafana Dashboard")
+            app.revoke_admin_api_key(con, "grafana")
+            con.commit()
+            self.assertFalse(app.require_admin(app.AppConfig(), {"authorization": f"Bearer {token}"}, con))
+            self.assertTrue(app.delete_revoked_admin_api_key(con, "grafana"))
+            con.commit()
+            con.close()
+
+    def test_web_auth_password_redirects_and_allows_login(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            app.connect_server(db).close()
+            config = app.AppConfig(
+                web_auth=app.WebAuthConfig(
+                    mode="password",
+                    session_secret="test-session-secret",
+                    username="admin",
+                    password_hash=app.password_hash("correct-password"),
+                )
+            )
+
+            responses, headers, _body = self.run_server_request(db, "GET", "/dashboard", config=config)
+            self.assertEqual(responses, [303])
+            self.assertIn(("location", "/auth/login?next=/dashboard"), headers)
+
+            form = parse.urlencode(
+                {"username": "admin", "password": "correct-password", "next": "/dashboard"}
+            ).encode("utf-8")
+            responses, headers, _body = self.run_server_request(
+                db,
+                "POST",
+                "/auth/login",
+                config=config,
+                body=form,
+            )
+            self.assertEqual(responses, [303])
+            cookie = next(value for key, value in headers if key == "set-cookie")
+            self.assertIn("ait_session=", cookie)
+
+            responses, _headers, body = self.run_server_request(
+                db,
+                "GET",
+                "/dashboard",
+                config=config,
+                headers={"cookie": cookie.split(";", 1)[0]},
+            )
+            self.assertEqual(responses, [200])
+            self.assertIn("Daily Dashboard", body)
+            self.assertIn('href="/auth/logout"', body)
+
+    def test_web_auth_oidc_login_redirects_to_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            app.connect_server(db).close()
+            config = app.AppConfig(
+                web_auth=app.WebAuthConfig(
+                    mode="oidc",
+                    session_secret="test-session-secret",
+                    oidc_issuer="https://id.example.com",
+                    oidc_client_id="client-id",
+                    oidc_client_secret="client-secret",
+                    oidc_redirect_url="https://usage.example.com/auth/oidc/callback",
+                )
+            )
+            with patch.object(
+                core,
+                "oidc_discovery",
+                return_value={"authorization_endpoint": "https://id.example.com/authorize"},
+            ):
+                responses, headers, _body = self.run_server_request(
+                    db,
+                    "POST",
+                    "/auth/login",
+                    config=config,
+                    body=parse.urlencode({"next": "/reports"}).encode("utf-8"),
+                )
+
+            self.assertEqual(responses, [303])
+            location = next(value for key, value in headers if key == "location")
+            self.assertTrue(location.startswith("https://id.example.com/authorize?"))
+            self.assertIn("client_id=client-id", location)
+            self.assertIn("redirect_uri=https%3A%2F%2Fusage.example.com%2Fauth%2Foidc%2Fcallback", location)
+            self.assertIn("response_type=code", location)
+            self.assertTrue(any(key == "set-cookie" and value.startswith("ait_oidc_state=") for key, value in headers))
 
     def test_admin_ui_shows_openrouter_configured_status(self):
         with tempfile.TemporaryDirectory() as tmp:

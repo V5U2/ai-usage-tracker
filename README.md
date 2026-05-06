@@ -145,8 +145,45 @@ http://127.0.0.1:8318/admin
 
 ![Aggregation server collector admin](docs/assets/aggregation-server-admin.png)
 
-New tokens are shown once. The server stores token hashes, not raw tokens. Add a
-generated token to each collector:
+By default the web UI has no app-level login, matching earlier releases. Keep
+that mode only on loopback, a trusted LAN, a VPN, or behind an authenticated
+proxy such as Cloudflare Access or Authentik. You can also enable built-in
+single-user password auth or generic OIDC auth in `server.toml`:
+
+```toml
+[web_auth]
+mode = "password"
+session_secret = "replace-with-a-long-random-string"
+username = "admin"
+password_hash = "pbkdf2_sha256$..."
+```
+
+Generate the password hash with:
+
+```bash
+python3 ai_usage_tracker.py server hash-password 'your-password'
+```
+
+For OIDC/OAuth-style login, configure a provider client with callback
+`/auth/oidc/callback`:
+
+```toml
+[web_auth]
+mode = "oidc"
+session_secret = "replace-with-a-long-random-string"
+oidc_issuer = "https://auth.example.com/application/o/ai-usage-tracker/"
+oidc_client_id = "client-id"
+oidc_client_secret = "client-secret"
+oidc_redirect_url = "https://usage.example.com/auth/oidc/callback"
+oidc_allowed_email = "you@example.com"
+```
+
+The OIDC implementation uses the authorization-code flow and the provider
+`userinfo_endpoint`; restrict the provider application or set an allowed email
+or subject.
+
+New collector and admin API tokens are shown once. The server stores token
+hashes, not raw tokens. Add a generated collector token to each collector:
 
 ```toml
 client_name = "work-laptop"
@@ -433,16 +470,16 @@ http://127.0.0.1:8318/reports
 http://127.0.0.1:8318/tools
 ```
 
-The dashboard is the default web view. It shows today's tokens, cost, and usage
-events, top usage by source and provider for today, plus rolling 7-day and
-30-day token and cost totals.
+The dashboard is the default web view. It shows today's tokens and cost, top
+usage by source and provider for today, plus rolling 7-day and 30-day token and
+cost totals.
 
-The admin UI creates, renames, revokes, and deletes revoked collector tokens. It
-also shows whether OpenRouter Broadcast is configured without revealing secret
-values. In the web UI, "collector" means the machine or ingestion process that
-reports usage to the aggregation server. Provider-side sources such as
-OpenRouter workspaces, projects, or API keys are reported separately from
-collector identity.
+The admin UI creates, renames, revokes, and deletes revoked collector tokens and
+managed admin API keys. It also shows whether OpenRouter Broadcast is configured
+without revealing secret values. In the web UI, "collector" means the machine or
+ingestion process that reports usage to the aggregation server. Provider-side
+sources such as OpenRouter workspaces, projects, or API keys are reported
+separately from collector identity.
 
 The server accepts compact usage and tool-event batches from collectors at
 `POST /api/v1/usage-events`. Report APIs are available at:
@@ -453,7 +490,9 @@ GET /api/v1/reports/tools
 GET /api/v1/stats
 ```
 
-Use `Authorization: Bearer <aggregation_server.admin_api_key>` for report APIs.
+Use `Authorization: Bearer <admin API key>` for report APIs. Prefer creating
+managed admin API keys in `/admin`; `[aggregation_server].admin_api_key` remains
+available as a static legacy key.
 Open `/reports` to view token totals grouped by provider, provider-side source,
 and model by default, with date picker filters plus provider, source, model,
 grouping, and row limit controls. Open `/tools` to view captured tool calls

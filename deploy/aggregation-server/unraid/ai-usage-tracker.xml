@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/V5U2/ai-usage-tracker/issues</Support>
   <Project>https://github.com/V5U2/ai-usage-tracker</Project>
-  <Overview>Central aggregation server for AI usage telemetry. Collectors forward compact usage events to this server, and OpenRouter Broadcast can send OTLP traces to /v1/traces when enabled. The server stores usage in SQLite and exposes token reports plus collector-token administration.</Overview>
+  <Overview>Central aggregation server for AI usage telemetry. Collectors forward compact usage events to this server, and OpenRouter Broadcast can send OTLP traces to /v1/traces when enabled. The server stores usage in SQLite and exposes token reports, optional web UI auth, collector-token administration, and managed admin API keys.</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8318]/reports</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/V5U2/ai-usage-tracker/main/deploy/aggregation-server/unraid/ai-usage-tracker.xml</TemplateURL>
