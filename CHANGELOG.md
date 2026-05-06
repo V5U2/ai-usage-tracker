@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/V5U2/ai-usage-tracker/compare/v0.4.2...v0.5.0) (2026-05-06)
+
+
+### Features
+
+* add dashboard-first reporting UI ([5b43b00](https://github.com/V5U2/ai-usage-tracker/commit/5b43b007fa12c3ce888cb4275089389fee27bc8c))
+* add optional web UI auth and managed admin API keys ([18b48fa](https://github.com/V5U2/ai-usage-tracker/commit/18b48fae8ed6e35bf8c99a1787f6c403f7c5694a))
+
 ## [0.4.2](https://github.com/V5U2/ai-usage-tracker/compare/v0.4.1...v0.4.2) (2026-05-05)
 
 
