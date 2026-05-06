@@ -2124,6 +2124,10 @@ def server_nav(active: str) -> str:
     )
 
 
+def server_viewport_meta() -> str:
+    return '<meta name="viewport" content="width=device-width, initial-scale=1">'
+
+
 def is_plain_release_version(version: str) -> bool:
     return re.fullmatch(r"v?\d+\.\d+\.\d+", version) is not None
 
@@ -2513,6 +2517,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
 <html>
 <head>
   <meta charset="utf-8">
+  {server_viewport_meta()}
   <title>AI Usage Tracker Reports</title>
   {favicon}
   <script>{theme_script}</script>
@@ -2593,6 +2598,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
 <html>
 <head>
   <meta charset="utf-8">
+  {server_viewport_meta()}
   <title>AI Usage Tracker Dashboard</title>
   {favicon}
   <script>{theme_script}</script>
@@ -2691,6 +2697,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
 <html>
 <head>
   <meta charset="utf-8">
+  {server_viewport_meta()}
   <title>AI Usage Tracker Tool Reports</title>
   {favicon}
   <script>{theme_script}</script>
@@ -2823,6 +2830,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
 <html>
 <head>
   <meta charset="utf-8">
+  {server_viewport_meta()}
   <title>AI Usage Tracker Admin</title>
   {favicon}
   <script>{theme_script}</script>

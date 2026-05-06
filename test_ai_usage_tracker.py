@@ -1675,6 +1675,7 @@ class ServerHttpTests(unittest.TestCase):
         self.assertIn('href="/dashboard"', body)
         self.assertIn('href="/reports"', body)
         self.assertIn('href="/tools"', body)
+        self.assertIn('<meta name="viewport" content="width=device-width, initial-scale=1">', body)
         self.assertIn('html[data-theme="dark"]', body)
         self.assertIn('localStorage.getItem("ait-theme")', body)
         self.assertIn('rel="icon" type="image/svg+xml"', body)
