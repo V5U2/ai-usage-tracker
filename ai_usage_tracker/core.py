@@ -2954,23 +2954,12 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </div>
     </section>
     <section class="panel">
-      <h2>Issue Collector Token</h2>
-      <form method="post" action="/admin/clients/create" class="filters">
-        <label>Collector name <input name="client_name" required pattern="[A-Za-z0-9_.-]+"></label>
-        <label>Display name <input name="display_name"></label>
-        <button type="submit">Create token</button>
-      </form>
-    </section>
-    <section class="panel">
-      <h2>Issue Admin API Key</h2>
+      <h2>Admin API Keys</h2>
       <form method="post" action="/admin/api-keys/create" class="filters">
         <label>Key name <input name="key_name" required pattern="[A-Za-z0-9_.-]+"></label>
         <label>Display name <input name="display_name"></label>
         <button type="submit">Create key</button>
       </form>
-    </section>
-    <section class="panel">
-      <h2>Existing Admin API Keys</h2>
       <table>
         <thead>
           <tr><th>Key</th><th>Display name</th><th>Status</th><th>Created</th><th>Updated</th><th>Last seen</th><th>Revoked</th><th>Actions</th></tr>
@@ -2979,7 +2968,12 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </table>
     </section>
     <section class="panel">
-      <h2>Existing Collector Tokens</h2>
+      <h2>Collector Tokens</h2>
+      <form method="post" action="/admin/clients/create" class="filters">
+        <label>Collector name <input name="client_name" required pattern="[A-Za-z0-9_.-]+"></label>
+        <label>Display name <input name="display_name"></label>
+        <button type="submit">Create token</button>
+      </form>
       <table>
         <thead>
           <tr><th>Collector</th><th>Display name</th><th>Status</th><th>Created</th><th>Updated</th><th>Last seen</th><th>Revoked</th><th>Actions</th></tr>
