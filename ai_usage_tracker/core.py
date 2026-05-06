@@ -1804,16 +1804,25 @@ def server_html_cell(column: str, value: Any, *, classes: str = "") -> str:
     return f"<td{class_attr}>{html.escape(format_cell(column, value))}</td>"
 
 
-def format_cost_summary(stats: Mapping[str, Any]) -> str:
+def format_cost_value(value: Any, *, decimals: int | None = None) -> str:
+    if value in (None, ""):
+        return ""
+    amount = float(value)
+    if decimals is not None:
+        return f"{amount:.{decimals}f}"
+    return f"{amount:.6f}".rstrip("0").rstrip(".") if amount else "0"
+
+
+def format_cost_summary(stats: Mapping[str, Any], *, decimals: int | None = None) -> str:
     cost_totals = stats.get("cost_totals") or []
     if cost_totals:
         parts = []
         for row in cost_totals:
-            value = format_cell("cost_value", row.get("cost_value"))
+            value = format_cost_value(row.get("cost_value"), decimals=decimals)
             unit = str(row.get("cost_unit") or "")
             parts.append(f"{value} {unit}".strip())
         return " + ".join(parts)
-    return f'{format_cell("cost_value", stats.get("cost_value"))} {str(stats.get("cost_unit") or "")}'.strip()
+    return f'{format_cost_value(stats.get("cost_value"), decimals=decimals)} {str(stats.get("cost_unit") or "")}'.strip()
 
 
 def default_columns(group_by: str) -> tuple[str, ...]:
@@ -1900,6 +1909,16 @@ def tool_default_columns(group_by: str) -> tuple[str, ...]:
 
 
 def server_default_columns(group_by: str) -> tuple[str, ...]:
+    usage_metric_columns = (
+        "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+        "cost_value",
+        "cost_unit",
+        "last_seen",
+    )
     source_columns = {
         "source": "source_kind",
         "workspace": "workspace_label",
@@ -1908,102 +1927,30 @@ def server_default_columns(group_by: str) -> tuple[str, ...]:
         "model-provider": "provider_name",
     }
     if group_by in source_columns:
-        return (
-            source_columns[group_by],
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-            "last_seen",
-        )
+        return (source_columns[group_by], *usage_metric_columns)
     if group_by == "provider-source":
-        return (
-            "source_provider",
-            "source_label",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-            "last_seen",
-        )
+        return ("source_provider", "source_label", *usage_metric_columns)
     if group_by == "provider-source-model":
-        return (
-            "source_provider",
-            "source_label",
-            "model",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-            "last_seen",
-        )
+        return ("source_provider", "source_label", "model", *usage_metric_columns)
     if group_by == "client":
-        return (
-            "client_name",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-            "last_seen",
-        )
+        return ("client_name", *usage_metric_columns)
     if group_by == "client-model":
-        return (
-            "client_name",
-            "model",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-            "last_seen",
-        )
+        return ("client_name", "model", *usage_metric_columns)
     if group_by == "day-client":
-        return (
-            "period",
-            "client_name",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-        )
+        return ("period", "client_name", *usage_metric_columns)
     if group_by == "day-model-client":
-        return (
-            "period",
-            "client_name",
-            "model",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-        )
-    return default_columns(group_by)
+        return ("period", "client_name", "model", *usage_metric_columns)
+    if group_by == "model":
+        return ("model", *usage_metric_columns)
+    if group_by == "session":
+        return ("session_id", *usage_metric_columns)
+    if group_by == "day":
+        return ("period", *usage_metric_columns)
+    if group_by == "day-model":
+        return ("period", "model", *usage_metric_columns)
+    if group_by == "day-session":
+        return ("period", "session_id", *usage_metric_columns)
+    return usage_metric_columns
 
 
 def server_tool_default_columns(group_by: str) -> tuple[str, ...]:
@@ -2477,17 +2424,22 @@ class ServerReceiver(BaseHTTPRequestHandler):
             group_by=group_by,
             since=query.get("since", [None])[0] or None,
             until=query.get("until", [None])[0] or None,
+            source_provider=query.get("source_provider", [None])[0] or None,
             tool_name=query.get("tool_name", [None])[0] or None,
             session_id=query.get("session_id", [None])[0] or None,
             client_name=query.get("client_name", [None])[0] or None,
             event_name=query.get("event_name", [""])[0],
+            success=query.get("success", [None])[0] or None,
+            decision=query.get("decision", [None])[0] or None,
+            source=query.get("source", [None])[0] or None,
+            mcp_server=query.get("mcp_server", [None])[0] or None,
             limit=limit,
         )
 
     def render_reports(self, con: sqlite3.Connection, query: dict[str, list[str]]) -> str:
         args = ServerReceiver.reports_args(query)
         app_config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
-        stats = server_stats_dict(con, app_config)
+        stats = server_stats_dict(con, app_config, args=args)
         rows = server_report_rows(con, args, app_config)
         columns = server_default_columns(args.group_by)
 
@@ -2581,6 +2533,9 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 cells = []
                 for column in columns:
                     classes = "num" if column in NUMERIC_COLUMNS or column in COST_COLUMNS else ""
+                    if column == "cost_value":
+                        cells.append(f'<td class="{classes}">{html.escape(format_cost_value(row[column], decimals=2))}</td>')
+                        continue
                     cells.append(server_html_cell(column, row[column], classes=classes))
                 body_rows.append(f"<tr>{''.join(cells)}</tr>")
             return (
@@ -2609,26 +2564,23 @@ class ServerReceiver(BaseHTTPRequestHandler):
   <main>
     <h1>Daily Dashboard</h1>
     <section class="summary compact">
-      <div><div class="label">Today's events</div><div class="value">{format_cell("events", today_stats["usage_events"])}</div></div>
       <div><div class="label">Today's tokens</div><div class="value">{format_cell("total_tokens", today_stats["total_tokens"])}</div></div>
-      <div><div class="label">Today's input</div><div class="value">{format_cell("input_tokens", today_stats["input_tokens"])}</div></div>
-      <div><div class="label">Today's output</div><div class="value">{format_cell("output_tokens", today_stats["output_tokens"])}</div></div>
-      <div><div class="label">Today's cost</div><div class="value">{html.escape(format_cost_summary(today_stats))}</div></div>
+      <div><div class="label">Today's cost</div><div class="value">{html.escape(format_cost_summary(today_stats, decimals=2))}</div></div>
     </section>
     <section class="summary compact">
       <div><div class="label">Last 7 days tokens</div><div class="value">{format_cell("total_tokens", week_stats["total_tokens"])}</div></div>
-      <div><div class="label">Last 7 days cost</div><div class="value">{html.escape(format_cost_summary(week_stats))}</div></div>
+      <div><div class="label">Last 7 days cost</div><div class="value">{html.escape(format_cost_summary(week_stats, decimals=2))}</div></div>
       <div><div class="label">Last 30 days tokens</div><div class="value">{format_cell("total_tokens", month_stats["total_tokens"])}</div></div>
-      <div><div class="label">Last 30 days cost</div><div class="value">{html.escape(format_cost_summary(month_stats))}</div></div>
+      <div><div class="label">Last 30 days cost</div><div class="value">{html.escape(format_cost_summary(month_stats, decimals=2))}</div></div>
     </section>
     <section class="dashboard-grid">
       <div class="panel">
         <div class="panel-head"><h2>Today's Usage By Source</h2></div>
-        {report_table(source_rows, ("source_provider", "source_label", "events", "total_tokens", "cost_value", "cost_unit"), "No usage today.")}
+        {report_table(source_rows, ("source_provider", "source_label", "total_tokens", "cost_value", "cost_unit"), "No usage today.")}
       </div>
       <div class="panel">
         <div class="panel-head"><h2>Today's Usage By Provider</h2></div>
-        {report_table(provider_rows, ("source_provider", "events", "total_tokens", "cost_value", "cost_unit"), "No usage today.")}
+        {report_table(provider_rows, ("source_provider", "total_tokens", "cost_value", "cost_unit"), "No usage today.")}
       </div>
     </section>
   </main>
@@ -2638,7 +2590,6 @@ class ServerReceiver(BaseHTTPRequestHandler):
 
     def render_tool_reports(self, con: sqlite3.Connection, query: dict[str, list[str]]) -> str:
         args = ServerReceiver.tool_reports_args(query)
-        stats = server_stats_dict(con)
         tool_summary = server_tool_summary(con, args)
         rows = server_tool_report_rows(con, args)
         recent_rows = server_tool_recent_rows(con, args)
@@ -2658,6 +2609,10 @@ class ServerReceiver(BaseHTTPRequestHandler):
         group_options = "\n".join(
             f'<option value="{html.escape(group)}"{" selected" if group == args.group_by else ""}>{html.escape(group)}</option>'
             for group in ServerReceiver.TOOL_REPORT_GROUPS
+        )
+        success_options = "\n".join(
+            f'<option value="{html.escape(value)}"{" selected" if value == (args.success or "") else ""}>{html.escape(label)}</option>'
+            for value, label in (("", "any"), ("true", "ok"), ("false", "fail"))
         )
         table_rows = []
         for row in rows:
@@ -2720,16 +2675,18 @@ class ServerReceiver(BaseHTTPRequestHandler):
       <div><div class="label">Failures</div><div class="value">{format_cell("failures", tool_summary["failures"])}</div></div>
       <div><div class="label">Duration</div><div class="value">{format_cell("total_duration_ms", tool_summary["total_duration_ms"])}</div></div>
       <div><div class="label">Avg duration</div><div class="value">{format_cell("avg_duration_ms", tool_summary["avg_duration_ms"])}</div></div>
-      <div><div class="label">All tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
     </section>
     <form method="get" action="/tools" class="filters">
       <label>Group by <select name="group_by">{group_options}</select></label>
-      <label>Since <input name="since" value="{field("since")}" placeholder="YYYY-MM-DD"></label>
-      <label>Until <input name="until" value="{field("until")}" placeholder="YYYY-MM-DD"></label>
+      <label>Since <input name="since" type="date" value="{field("since")}"></label>
+      <label>Until <input name="until" type="date" value="{field("until")}"></label>
+      <label>Provider <input name="source_provider" value="{field("source_provider")}"></label>
       <label>Collector <input name="client_name" value="{field("client_name")}"></label>
       <label>Tool <input name="tool_name" value="{field("tool_name")}"></label>
-      <label>Event <input name="event_name" value="{field("event_name")}"></label>
-      <label>Session <input name="session_id" value="{field("session_id")}"></label>
+      <label>Success <select name="success">{success_options}</select></label>
+      <label>Decision <input name="decision" value="{field("decision")}"></label>
+      <label>Source <input name="source" value="{field("source")}"></label>
+      <label>MCP <input name="mcp_server" value="{field("mcp_server")}"></label>
       <label>Limit <input name="limit" type="number" min="1" max="1000" value="{args.limit}"></label>
       <button type="submit">Apply</button>
     </form>
@@ -2822,6 +2779,21 @@ class ServerReceiver(BaseHTTPRequestHandler):
         openrouter_auth = "yes" if openrouter.api_key else "no"
         openrouter_extra_header = "yes" if openrouter.required_header_name and openrouter.required_header_value else "no"
         openrouter_retain = "yes" if openrouter.retain_payload_body else "no"
+        openrouter_help = {
+            "Status": "Configured only when OpenRouter Broadcast is enabled and an API key is present.",
+            "Enabled": "Shows whether the server will accept OpenRouter Broadcast ingestion requests.",
+            "API key": "Shows whether a broadcast API key is configured; the credential value is never displayed.",
+            "Extra header": "Shows whether an additional required header is configured for broadcast requests.",
+            "Retain payloads": "Shows whether raw OpenRouter Broadcast payload bodies are stored for replay/debugging.",
+        }
+
+        def status_box(label: str, value: str) -> str:
+            help_text = html.escape(openrouter_help[label], quote=True)
+            return (
+                f'<div title="{help_text}"><div class="label">{html.escape(label)}</div>'
+                f'<div class="value">{html.escape(value)}</div></div>'
+            )
+
         nav = server_nav("admin")
         styles = server_page_styles(admin=True)
         theme_script = server_theme_script()
@@ -2845,11 +2817,11 @@ class ServerReceiver(BaseHTTPRequestHandler):
     <section class="panel">
       <h2>OpenRouter Broadcast</h2>
       <div class="summary compact">
-        <div><div class="label">Status</div><div class="value">{openrouter_status}</div></div>
-        <div><div class="label">Enabled</div><div class="value">{openrouter_enabled}</div></div>
-        <div><div class="label">API key</div><div class="value">{openrouter_auth}</div></div>
-        <div><div class="label">Extra header</div><div class="value">{openrouter_extra_header}</div></div>
-        <div><div class="label">Retain payloads</div><div class="value">{openrouter_retain}</div></div>
+        {status_box("Status", openrouter_status)}
+        {status_box("Enabled", openrouter_enabled)}
+        {status_box("API key", openrouter_auth)}
+        {status_box("Extra header", openrouter_extra_header)}
+        {status_box("Retain payloads", openrouter_retain)}
       </div>
     </section>
     <section class="panel">
@@ -4121,6 +4093,9 @@ def server_tool_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
     if until:
         clauses.append("tool_events.source_received_at <= ?")
         params.append(until)
+    if getattr(args, "source_provider", None):
+        clauses.append(f"{tool_source_provider_expression()} = ?")
+        params.append(args.source_provider)
     if getattr(args, "tool_name", None):
         clauses.append("tool_events.tool_name = ?")
         params.append(args.tool_name)
@@ -4133,6 +4108,18 @@ def server_tool_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
     if getattr(args, "event_name", None):
         clauses.append("tool_events.event_name = ?")
         params.append(args.event_name)
+    if getattr(args, "success", None):
+        clauses.append("tool_events.success = ?")
+        params.append(args.success)
+    if getattr(args, "decision", None):
+        clauses.append("tool_events.decision = ?")
+        params.append(args.decision)
+    if getattr(args, "source", None):
+        clauses.append("tool_events.source = ?")
+        params.append(args.source)
+    if getattr(args, "mcp_server", None):
+        clauses.append("tool_events.mcp_server = ?")
+        params.append(args.mcp_server)
     return ("where " + " and ".join(clauses), params) if clauses else ("", params)
 
 
@@ -4438,6 +4425,7 @@ def server_tool_recent_rows(con: sqlite3.Connection, args: argparse.Namespace) -
 
 
 def server_tool_summary(con: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.Row:
+    register_report_functions(con)
     where, params = server_tool_where_clause(args)
     query = f"""
         select
@@ -4461,42 +4449,51 @@ def server_stats_dict(
     *,
     since: str | None = None,
     until: str | None = None,
+    args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
-    nonzero_cost_unit_expr = nonzero_cost_unit_expression("", config)
+    register_report_functions(con)
+    nonzero_cost_unit_expr = nonzero_cost_unit_expression("usage_events.", config)
     clauses = []
     params: list[Any] = []
-    parsed_since = parse_datetime_filter(since)
-    parsed_until = parse_datetime_filter(until, end_of_day=True)
-    if parsed_since:
-        clauses.append("source_received_at >= ?")
-        params.append(parsed_since)
-    if parsed_until:
-        clauses.append("source_received_at <= ?")
-        params.append(parsed_until)
-    where_sql = ("where " + " and ".join(clauses)) if clauses else ""
-    cost_where_sql = "where " + " and ".join([f"{nonzero_cost_unit_expr} is not null", *clauses])
+    if args is not None:
+        where_sql, params = server_where_clause(args)
+    else:
+        parsed_since = parse_datetime_filter(since)
+        parsed_until = parse_datetime_filter(until, end_of_day=True)
+        if parsed_since:
+            clauses.append("usage_events.source_received_at >= ?")
+            params.append(parsed_since)
+        if parsed_until:
+            clauses.append("usage_events.source_received_at <= ?")
+            params.append(parsed_until)
+        where_sql = ("where " + " and ".join(clauses)) if clauses else ""
+    cost_clauses = [f"{nonzero_cost_unit_expr} is not null"]
+    if where_sql:
+        cost_clauses.append(where_sql.removeprefix("where "))
+    cost_where_sql = "where " + " and ".join(cost_clauses)
     totals = con.execute(
         f"""
         select
             count(*) as usage_events,
-            count(distinct client_name) as active_clients,
-            coalesce(sum(input_tokens), 0) as input_tokens,
-            coalesce(sum(output_tokens), 0) as output_tokens,
-            coalesce(sum(total_tokens), 0) as total_tokens,
-            coalesce(sum(cached_tokens), 0) as cached_tokens,
-            coalesce(sum(reasoning_tokens), 0) as reasoning_tokens,
+            count(distinct usage_events.client_name) as active_clients,
+            coalesce(sum(usage_events.input_tokens), 0) as input_tokens,
+            coalesce(sum(usage_events.output_tokens), 0) as output_tokens,
+            coalesce(sum(usage_events.total_tokens), 0) as total_tokens,
+            coalesce(sum(usage_events.cached_tokens), 0) as cached_tokens,
+            coalesce(sum(usage_events.reasoning_tokens), 0) as reasoning_tokens,
             case
-              when count(distinct {nonzero_cost_unit_expr}) <= 1 then coalesce(sum(cost_value), 0)
+              when count(distinct {nonzero_cost_unit_expr}) <= 1 then coalesce(sum(usage_events.cost_value), 0)
               else null
             end as cost_value,
             case
               when count(distinct {nonzero_cost_unit_expr}) <= 1 then max({nonzero_cost_unit_expr})
               else 'mixed'
             end as cost_unit,
-            min(source_received_at) as first_seen,
-            max(source_received_at) as last_seen
+            min(usage_events.source_received_at) as first_seen,
+            max(usage_events.source_received_at) as last_seen
         from usage_events
-        {where_sql}
+        left join clients on clients.client_name = usage_events.client_name
+            {where_sql}
         """
         ,
         params,
@@ -4507,8 +4504,9 @@ def server_stats_dict(
             f"""
             select
                 {nonzero_cost_unit_expr} as cost_unit,
-                coalesce(sum(cost_value), 0) as cost_value
+                coalesce(sum(usage_events.cost_value), 0) as cost_value
             from usage_events
+            left join clients on clients.client_name = usage_events.client_name
             {cost_where_sql}
             group by 1
             order by case when {nonzero_cost_unit_expr} = 'USD' then 0 else 1 end, 1
@@ -4520,7 +4518,7 @@ def server_stats_dict(
     tool_events = con.execute("select count(*) from tool_events").fetchone()[0]
     out = dict(totals)
     out["cost_totals"] = cost_totals
-    out["configured_clients"] = clients
+    out["configured_clients"] = out["active_clients"] if (args is not None or since or until) else clients
     out["tool_events"] = tool_events
     return out
 
