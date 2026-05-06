@@ -2333,6 +2333,38 @@ class ServerHttpTests(unittest.TestCase):
             self.assertNotIn("<th>events</th>", body)
             con.close()
 
+    def test_dashboard_preserves_sub_cent_costs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.create_client_token(con, "laptop", "Laptop")
+            today = dt.datetime.now(dt.timezone.utc).replace(hour=1, minute=2, second=3, microsecond=0).isoformat()
+            app.ingest_usage_events(
+                con,
+                "laptop",
+                [
+                    {
+                        "client_event_id": "sub-cent-cost",
+                        "received_at": today,
+                        "signal": "logs",
+                        "event_name": "codex.usage",
+                        "model": "gpt-test",
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                        "cost_value": 0.004,
+                        "cost_unit": "USD",
+                        "attributes_json": "{}",
+                    }
+                ],
+            )
+            con.commit()
+
+            body = app.ServerReceiver.render_dashboard(object(), con)
+            con.close()
+
+            self.assertIn("&lt;0.01 USD", body)
+            self.assertNotIn(">0.00 USD<", body)
+
     def test_server_default_usage_report_groups_by_provider_source_model(self):
         body = json.dumps(openrouter_trace_payload()).encode()
         config = app.AppConfig(openrouter_broadcast=app.OpenRouterBroadcastConfig(enabled=True, api_key="orb_secret"))

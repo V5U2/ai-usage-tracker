@@ -1804,25 +1804,32 @@ def server_html_cell(column: str, value: Any, *, classes: str = "") -> str:
     return f"<td{class_attr}>{html.escape(format_cell(column, value))}</td>"
 
 
-def format_cost_value(value: Any, *, decimals: int | None = None) -> str:
+def format_cost_value(value: Any, *, decimals: int | None = None, min_nonzero: bool = False) -> str:
     if value in (None, ""):
         return ""
     amount = float(value)
     if decimals is not None:
+        if min_nonzero and amount != 0 and round(abs(amount), decimals) == 0:
+            threshold = 10 ** -decimals
+            sign = "-" if amount < 0 else ""
+            return f"{sign}<{threshold:.{decimals}f}"
         return f"{amount:.{decimals}f}"
     return f"{amount:.6f}".rstrip("0").rstrip(".") if amount else "0"
 
 
-def format_cost_summary(stats: Mapping[str, Any], *, decimals: int | None = None) -> str:
+def format_cost_summary(stats: Mapping[str, Any], *, decimals: int | None = None, min_nonzero: bool = False) -> str:
     cost_totals = stats.get("cost_totals") or []
     if cost_totals:
         parts = []
         for row in cost_totals:
-            value = format_cost_value(row.get("cost_value"), decimals=decimals)
+            value = format_cost_value(row.get("cost_value"), decimals=decimals, min_nonzero=min_nonzero)
             unit = str(row.get("cost_unit") or "")
             parts.append(f"{value} {unit}".strip())
         return " + ".join(parts)
-    return f'{format_cost_value(stats.get("cost_value"), decimals=decimals)} {str(stats.get("cost_unit") or "")}'.strip()
+    return (
+        f'{format_cost_value(stats.get("cost_value"), decimals=decimals, min_nonzero=min_nonzero)} '
+        f'{str(stats.get("cost_unit") or "")}'
+    ).strip()
 
 
 def default_columns(group_by: str) -> tuple[str, ...]:
@@ -2534,7 +2541,8 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 for column in columns:
                     classes = "num" if column in NUMERIC_COLUMNS or column in COST_COLUMNS else ""
                     if column == "cost_value":
-                        cells.append(f'<td class="{classes}">{html.escape(format_cost_value(row[column], decimals=2))}</td>')
+                        value = format_cost_value(row[column], decimals=2, min_nonzero=True)
+                        cells.append(f'<td class="{classes}">{html.escape(value)}</td>')
                         continue
                     cells.append(server_html_cell(column, row[column], classes=classes))
                 body_rows.append(f"<tr>{''.join(cells)}</tr>")
@@ -2566,13 +2574,13 @@ class ServerReceiver(BaseHTTPRequestHandler):
     <h1>Daily Dashboard</h1>
     <section class="summary compact">
       <div><div class="label">Today's tokens</div><div class="value">{format_cell("total_tokens", today_stats["total_tokens"])}</div></div>
-      <div><div class="label">Today's cost</div><div class="value">{html.escape(format_cost_summary(today_stats, decimals=2))}</div></div>
+      <div><div class="label">Today's cost</div><div class="value">{html.escape(format_cost_summary(today_stats, decimals=2, min_nonzero=True))}</div></div>
     </section>
     <section class="summary compact">
       <div><div class="label">Last 7 days tokens</div><div class="value">{format_cell("total_tokens", week_stats["total_tokens"])}</div></div>
-      <div><div class="label">Last 7 days cost</div><div class="value">{html.escape(format_cost_summary(week_stats, decimals=2))}</div></div>
+      <div><div class="label">Last 7 days cost</div><div class="value">{html.escape(format_cost_summary(week_stats, decimals=2, min_nonzero=True))}</div></div>
       <div><div class="label">Last 30 days tokens</div><div class="value">{format_cell("total_tokens", month_stats["total_tokens"])}</div></div>
-      <div><div class="label">Last 30 days cost</div><div class="value">{html.escape(format_cost_summary(month_stats, decimals=2))}</div></div>
+      <div><div class="label">Last 30 days cost</div><div class="value">{html.escape(format_cost_summary(month_stats, decimals=2, min_nonzero=True))}</div></div>
     </section>
     <section class="dashboard-grid">
       <div class="panel">
