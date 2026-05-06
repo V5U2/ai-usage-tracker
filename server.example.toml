@@ -5,8 +5,35 @@ client_name = "server"
 host = "127.0.0.1"
 port = 8318
 db = "ai_usage_server.sqlite"
-# Required for JSON report APIs. The LAN-only admin UI does not require login.
+# Optional legacy static API key for JSON report APIs. Prefer creating managed
+# admin API keys in the web UI after first start.
 # admin_api_key = "change-me"
+
+[web_auth]
+# Web UI auth mode:
+# - "none": no app login; use only on loopback, trusted LAN, VPN, or behind
+#   Cloudflare Access/Authentik/etc.
+# - "password": single local username/password login.
+# - "oidc": generic OIDC authorization-code login using the provider userinfo endpoint.
+mode = "none"
+# Required for "password" or "oidc"; generate a long random value.
+# session_secret = "change-me-to-a-long-random-string"
+
+# Password mode. Generate the hash with:
+# python3 ai_usage_tracker.py server hash-password 'your-password'
+# username = "admin"
+# password_hash = "pbkdf2_sha256$..."
+
+# OIDC mode.
+# oidc_issuer = "https://auth.example.com/application/o/ai-usage-tracker/"
+# oidc_client_id = "client-id"
+# oidc_client_secret = "client-secret"
+# Optional when reverse proxy headers do not produce the public callback URL.
+# oidc_redirect_url = "https://usage.example.com/auth/oidc/callback"
+# oidc_scopes = ["openid", "email", "profile"]
+# Optional allowlist. Set at least one when the provider app is not already restricted.
+# oidc_allowed_email = "you@example.com"
+# oidc_allowed_subject = "provider-subject-id"
 
 [openrouter_broadcast]
 # Optional direct OpenRouter Broadcast OTLP ingest at POST /v1/traces.
