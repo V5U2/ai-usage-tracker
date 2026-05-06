@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 from urllib import parse
 
@@ -1694,7 +1695,7 @@ class ServerHttpTests(unittest.TestCase):
         *,
         config=None,
         body: bytes = b"",
-        headers: dict[str, str] | None = None,
+        headers: Optional[dict[str, str]] = None,
     ):
         handler = object.__new__(app.ServerReceiver)
         handler.db_path = db
