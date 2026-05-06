@@ -2233,9 +2233,9 @@ def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
     return f"""
     :root {{ color-scheme: light; --bg: #fbfcfd; --text: #17202a; --muted: #5b6773; --surface: #ffffff; --surface-soft: #f3f6f8; --border: #d7dde3; --border-strong: #cfd7df; --active-bg: #17202a; --active-text: #ffffff; --danger-bg: #fdecec; --danger-border: #efb1b1; --danger-text: #9f1d1d; --ok-bg: #eaf7ee; --ok-border: #afd9bb; --ok-text: #1d6b38; }}
     html[data-theme="dark"] {{ color-scheme: dark; --bg: #111418; --text: #edf2f7; --muted: #a8b3bf; --surface: #181d23; --surface-soft: #202731; --border: #303946; --border-strong: #465160; --active-bg: #edf2f7; --active-text: #111418; --danger-bg: #3a1f24; --danger-border: #7d3941; --danger-text: #ffb8c1; --ok-bg: #173321; --ok-border: #315f40; --ok-text: #a9e7b8; }}
-    body {{ font-family: system-ui, sans-serif; margin: 2rem; color: var(--text); background: var(--bg); }}
-    nav {{ display: flex; gap: .75rem; margin-bottom: 1.5rem; align-items: center; }}
-    .nav-primary, .nav-actions {{ display: flex; gap: .5rem; align-items: center; }}
+    body {{ font-family: system-ui, sans-serif; margin: clamp(1rem, 4vw, 2rem); color: var(--text); background: var(--bg); }}
+    nav {{ display: flex; flex-wrap: wrap; gap: .75rem; margin-bottom: 1.5rem; align-items: center; }}
+    .nav-primary, .nav-actions {{ display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }}
     .nav-actions {{ margin-left: auto; }}
     nav a, .theme-toggle {{ border: 1px solid var(--border-strong); color: var(--text); padding: .4rem .65rem; text-decoration: none; background: var(--surface); font: inherit; }}
     nav a.active {{ background: var(--active-bg); color: var(--active-text); border-color: var(--active-bg); }}
@@ -2247,10 +2247,12 @@ def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
     input, select {{ padding: .4rem; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }}
     button {{ padding: .42rem .7rem; border: 1px solid var(--active-bg); background: var(--active-bg); color: var(--active-text); }}
     .filters {{ display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; background: var(--surface); border: 1px solid var(--border); padding: .85rem; }}
-    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .75rem; }}
-    .summary.compact {{ grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }}
+    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr)); gap: .75rem; }}
+    .summary.compact {{ grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr)); }}
     .summary div {{ border: 1px solid var(--border); padding: .75rem; background: var(--surface); }}
-    .dashboard-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr)); gap: 1rem; align-items: start; }}
+    .dashboard-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: 1rem; align-items: start; }}
+    .table-scroll {{ max-width: 100%; overflow-x: auto; border: 1px solid var(--border); background: var(--surface); }}
+    .table-scroll table {{ min-width: 34rem; }}
     .panel {{ display: grid; gap: .75rem; }}
     .panel-head {{ display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; }}
     .panel-head h2 {{ margin: 0; font-size: 1.05rem; }}
@@ -2261,6 +2263,14 @@ def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
     .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
     label {{ display: grid; gap: .25rem; }}
     .app-footer {{ margin-top: 2rem; color: var(--muted); font-size: .8rem; }}
+    @media (max-width: 640px) {{
+      h1 {{ font-size: 1.7rem; }}
+      .nav-actions {{ margin-left: 0; }}
+      nav a, .theme-toggle {{ padding: .36rem .52rem; }}
+      .filters {{ display: grid; grid-template-columns: 1fr; }}
+      input, select, button {{ width: 100%; box-sizing: border-box; }}
+      .value {{ font-size: 1.08rem; overflow-wrap: anywhere; }}
+    }}
 {extra}"""
 
 
@@ -2569,10 +2579,10 @@ class ServerReceiver(BaseHTTPRequestHandler):
                     cells.append(server_html_cell(column, row[column], classes=classes))
                 body_rows.append(f"<tr>{''.join(cells)}</tr>")
             return (
-                "<table>"
+                '<div class="table-scroll"><table>'
                 f"<thead><tr>{headers}</tr></thead>"
                 f"<tbody>{''.join(body_rows) or f'<tr><td colspan=\"{len(columns)}\">{html.escape(empty)}</td></tr>'}</tbody>"
-                "</table>"
+                "</table></div>"
             )
 
         nav = server_nav("dashboard")

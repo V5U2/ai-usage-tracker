@@ -2285,6 +2285,8 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("Last 30 days cost", body)
             self.assertIn("Today's Usage By Source", body)
             self.assertIn("Today's Usage By Provider", body)
+            self.assertIn('class="table-scroll"', body)
+            self.assertIn("minmax(min(100%, 24rem), 1fr)", body)
             self.assertIn("<td>Codex</td>", body)
             self.assertIn("<td>Laptop</td>", body)
             con.close()
