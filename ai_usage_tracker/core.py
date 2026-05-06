@@ -2538,10 +2538,11 @@ class ServerReceiver(BaseHTTPRequestHandler):
                         continue
                     cells.append(server_html_cell(column, row[column], classes=classes))
                 body_rows.append(f"<tr>{''.join(cells)}</tr>")
+            empty_row = f'<tr><td colspan="{len(columns)}">{html.escape(empty)}</td></tr>'
             return (
                 '<div class="table-scroll"><table>'
                 f"<thead><tr>{headers}</tr></thead>"
-                f"<tbody>{''.join(body_rows) or f'<tr><td colspan=\"{len(columns)}\">{html.escape(empty)}</td></tr>'}</tbody>"
+                f"<tbody>{''.join(body_rows) or empty_row}</tbody>"
                 "</table></div>"
             )
 
