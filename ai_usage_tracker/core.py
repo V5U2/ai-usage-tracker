@@ -2103,6 +2103,7 @@ def print_table(rows: Sequence[sqlite3.Row], columns: Sequence[str] = REPORT_COL
 
 def server_nav(active: str) -> str:
     items = (
+        ("dashboard", "/dashboard", "Dashboard"),
         ("usage", "/reports", "Token Usage"),
         ("tools", "/tools", "Tool Usage"),
     )
@@ -2247,7 +2248,9 @@ def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
     button {{ padding: .42rem .7rem; border: 1px solid var(--active-bg); background: var(--active-bg); color: var(--active-text); }}
     .filters {{ display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; background: var(--surface); border: 1px solid var(--border); padding: .85rem; }}
     .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .75rem; }}
+    .summary.compact {{ grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }}
     .summary div {{ border: 1px solid var(--border); padding: .75rem; background: var(--surface); }}
+    .dashboard-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr)); gap: 1rem; align-items: start; }}
     .panel {{ display: grid; gap: .75rem; }}
     .panel-head {{ display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; }}
     .panel-head h2 {{ margin: 0; font-size: 1.05rem; }}
@@ -2363,6 +2366,30 @@ class ServerReceiver(BaseHTTPRequestHandler):
     db_path: Path = DEFAULT_SERVER_DB
     app_config: AppConfig = DEFAULT_APP_CONFIG
 
+    @staticmethod
+    def report_args(
+        group_by: str,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 100,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            group_by=group_by,
+            since=since,
+            until=until,
+            model=None,
+            session_id=None,
+            client_name=None,
+            source_provider=None,
+            source_label=None,
+            source_kind=None,
+            workspace_label=None,
+            api_key_label=None,
+            provider_name=None,
+            limit=limit,
+        )
+
     def send_json(self, status: int, payload: dict[str, Any] | list[dict[str, Any]]) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
         self.send_response(status)
@@ -2413,6 +2440,8 @@ class ServerReceiver(BaseHTTPRequestHandler):
             model=query.get("model", [None])[0] or None,
             session_id=query.get("session_id", [None])[0] or None,
             client_name=query.get("client_name", [None])[0] or None,
+            source_provider=query.get("source_provider", [None])[0] or None,
+            source_label=query.get("source_label", [None])[0] or None,
             source_kind=query.get("source_kind", [None])[0] or None,
             workspace_label=query.get("workspace_label", [None])[0] or None,
             api_key_label=query.get("api_key_label", [None])[0] or None,
@@ -2484,25 +2513,20 @@ class ServerReceiver(BaseHTTPRequestHandler):
 	  <main>
 	    <h1>Usage Reports</h1>
     <section class="summary">
-      <div><div class="label">Events</div><div class="value">{format_cell("events", stats["usage_events"])}</div></div>
       <div><div class="label">Total tokens</div><div class="value">{format_cell("total_tokens", stats["total_tokens"])}</div></div>
 	      <div><div class="label">Input</div><div class="value">{format_cell("input_tokens", stats["input_tokens"])}</div></div>
 	      <div><div class="label">Output</div><div class="value">{format_cell("output_tokens", stats["output_tokens"])}</div></div>
 	      <div><div class="label">Cost</div><div class="value">{html.escape(format_cost_summary(stats))}</div></div>
-	      <div><div class="label">Tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
       <div><div class="label">Collectors</div><div class="value">{format_cell("events", stats["configured_clients"])}</div></div>
+      <div><div class="label">Events</div><div class="value">{format_cell("events", stats["usage_events"])}</div></div>
     </section>
     <form method="get" action="/reports" class="filters">
       <label>Group by <select name="group_by">{group_options}</select></label>
-      <label>Since <input name="since" value="{field("since")}" placeholder="YYYY-MM-DD"></label>
-      <label>Until <input name="until" value="{field("until")}" placeholder="YYYY-MM-DD"></label>
-	      <label>Collector <input name="client_name" value="{field("client_name")}"></label>
+      <label>Since <input name="since" type="date" value="{field("since")}"></label>
+      <label>Until <input name="until" type="date" value="{field("until")}"></label>
+	      <label>Provider <input name="source_provider" value="{field("source_provider")}"></label>
+	      <label>Source <input name="source_label" value="{field("source_label")}"></label>
 	      <label>Model <input name="model" value="{field("model")}"></label>
-	      <label>Session <input name="session_id" value="{field("session_id")}"></label>
-	      <label>Source kind <input name="source_kind" value="{field("source_kind")}"></label>
-	      <label>Workspace <input name="workspace_label" value="{field("workspace_label")}"></label>
-	      <label>API key <input name="api_key_label" value="{field("api_key_label")}"></label>
-	      <label>Model provider <input name="provider_name" value="{field("provider_name")}"></label>
       <label>Limit <input name="limit" type="number" min="1" max="1000" value="{args.limit}"></label>
       <button type="submit">Apply</button>
     </form>
@@ -2510,6 +2534,87 @@ class ServerReceiver(BaseHTTPRequestHandler):
       <thead><tr>{headers}</tr></thead>
       <tbody>{''.join(table_rows) or empty_row}</tbody>
     </table>
+  </main>
+  {server_footer()}
+</body>
+</html>"""
+
+    def render_dashboard(self, con: sqlite3.Connection) -> str:
+        app_config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
+        today = dt.datetime.now(dt.timezone.utc).date()
+        today_since = today.isoformat()
+        week_since = (today - dt.timedelta(days=6)).isoformat()
+        month_since = (today - dt.timedelta(days=29)).isoformat()
+        today_stats = server_stats_dict(con, app_config, since=today_since)
+        week_stats = server_stats_dict(con, app_config, since=week_since)
+        month_stats = server_stats_dict(con, app_config, since=month_since)
+        source_rows = server_report_rows(
+            con,
+            ServerReceiver.report_args("provider-source", since=today_since, limit=8),
+            app_config,
+        )
+        provider_rows = server_report_rows(
+            con,
+            ServerReceiver.report_args("provider", since=today_since, limit=8),
+            app_config,
+        )
+
+        def report_table(rows: Sequence[sqlite3.Row], columns: Sequence[str], empty: str) -> str:
+            headers = "".join(f"<th>{html.escape(DISPLAY_NAMES.get(column, column))}</th>" for column in columns)
+            body_rows = []
+            for row in rows:
+                cells = []
+                for column in columns:
+                    classes = "num" if column in NUMERIC_COLUMNS or column in COST_COLUMNS else ""
+                    cells.append(server_html_cell(column, row[column], classes=classes))
+                body_rows.append(f"<tr>{''.join(cells)}</tr>")
+            return (
+                "<table>"
+                f"<thead><tr>{headers}</tr></thead>"
+                f"<tbody>{''.join(body_rows) or f'<tr><td colspan=\"{len(columns)}\">{html.escape(empty)}</td></tr>'}</tbody>"
+                "</table>"
+            )
+
+        nav = server_nav("dashboard")
+        styles = server_page_styles()
+        theme_script = server_theme_script()
+        favicon = server_favicon_link()
+        return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>AI Usage Tracker Dashboard</title>
+  {favicon}
+  <script>{theme_script}</script>
+  <style>{styles}</style>
+</head>
+<body>
+  {nav}
+  <main>
+    <h1>Daily Dashboard</h1>
+    <section class="summary compact">
+      <div><div class="label">Today's events</div><div class="value">{format_cell("events", today_stats["usage_events"])}</div></div>
+      <div><div class="label">Today's tokens</div><div class="value">{format_cell("total_tokens", today_stats["total_tokens"])}</div></div>
+      <div><div class="label">Today's input</div><div class="value">{format_cell("input_tokens", today_stats["input_tokens"])}</div></div>
+      <div><div class="label">Today's output</div><div class="value">{format_cell("output_tokens", today_stats["output_tokens"])}</div></div>
+      <div><div class="label">Today's cost</div><div class="value">{html.escape(format_cost_summary(today_stats))}</div></div>
+    </section>
+    <section class="summary compact">
+      <div><div class="label">Last 7 days tokens</div><div class="value">{format_cell("total_tokens", week_stats["total_tokens"])}</div></div>
+      <div><div class="label">Last 7 days cost</div><div class="value">{html.escape(format_cost_summary(week_stats))}</div></div>
+      <div><div class="label">Last 30 days tokens</div><div class="value">{format_cell("total_tokens", month_stats["total_tokens"])}</div></div>
+      <div><div class="label">Last 30 days cost</div><div class="value">{html.escape(format_cost_summary(month_stats))}</div></div>
+    </section>
+    <section class="dashboard-grid">
+      <div class="panel">
+        <div class="panel-head"><h2>Today's Usage By Source</h2></div>
+        {report_table(source_rows, ("source_provider", "source_label", "events", "total_tokens", "cost_value", "cost_unit"), "No usage today.")}
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Today's Usage By Provider</h2></div>
+        {report_table(provider_rows, ("source_provider", "events", "total_tokens", "cost_value", "cost_unit"), "No usage today.")}
+      </div>
+    </section>
   </main>
   {server_footer()}
 </body>
@@ -2631,6 +2736,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
 </html>"""
 
     def render_admin(self, con: sqlite3.Connection, *, message: str | None = None, token: str | None = None) -> str:
+        app_config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
         clients = con.execute(
             """
             select client_name, display_name, created_at, updated_at, revoked_at, last_seen_at
@@ -2692,6 +2798,13 @@ class ServerReceiver(BaseHTTPRequestHandler):
             </section>
             """
         message_block = f"<section class=\"notice\">{html.escape(message)}</section>" if message else ""
+        openrouter = app_config.openrouter_broadcast
+        openrouter_configured = openrouter.enabled and bool(openrouter.api_key)
+        openrouter_status = "configured" if openrouter_configured else "not configured"
+        openrouter_enabled = "yes" if openrouter.enabled else "no"
+        openrouter_auth = "yes" if openrouter.api_key else "no"
+        openrouter_extra_header = "yes" if openrouter.required_header_name and openrouter.required_header_value else "no"
+        openrouter_retain = "yes" if openrouter.retain_payload_body else "no"
         nav = server_nav("admin")
         styles = server_page_styles(admin=True)
         theme_script = server_theme_script()
@@ -2711,6 +2824,16 @@ class ServerReceiver(BaseHTTPRequestHandler):
     <h1>Collector Admin</h1>
     {message_block}
     {token_block}
+    <section class="panel">
+      <h2>OpenRouter Broadcast</h2>
+      <div class="summary compact">
+        <div><div class="label">Status</div><div class="value">{openrouter_status}</div></div>
+        <div><div class="label">Enabled</div><div class="value">{openrouter_enabled}</div></div>
+        <div><div class="label">API key</div><div class="value">{openrouter_auth}</div></div>
+        <div><div class="label">Extra header</div><div class="value">{openrouter_extra_header}</div></div>
+        <div><div class="label">Retain payloads</div><div class="value">{openrouter_retain}</div></div>
+      </div>
+    </section>
     <section class="panel">
       <h2>Create Collector Token</h2>
       <form method="post" action="/admin/clients/create" class="filters">
@@ -2736,11 +2859,14 @@ class ServerReceiver(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = parse.urlparse(self.path)
         if parsed.path in ("", "/"):
-            self.redirect("/reports")
+            self.redirect("/dashboard")
             return
         query = parse.parse_qs(parsed.query, keep_blank_values=True)
         con = connect_server(self.db_path)
         try:
+            if parsed.path == "/dashboard":
+                self.send_html(200, self.render_dashboard(con))
+                return
             if parsed.path == "/admin":
                 message = query.get("message", [None])[0]
                 self.send_html(200, self.render_admin(con, message=message))
@@ -3945,6 +4071,12 @@ def server_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
     if getattr(args, "client_name", None):
         clauses.append("usage_events.client_name = ?")
         params.append(args.client_name)
+    if getattr(args, "source_provider", None):
+        clauses.append(f"{source_provider_expression()} = ?")
+        params.append(args.source_provider)
+    if getattr(args, "source_label", None):
+        clauses.append(f"{source_label_expression()} = ?")
+        params.append(args.source_label)
     if getattr(args, "source_kind", None):
         clauses.append("usage_events.source_kind = ?")
         params.append(args.source_kind)
@@ -4305,8 +4437,26 @@ def server_tool_summary(con: sqlite3.Connection, args: argparse.Namespace) -> sq
     return con.execute(query, params).fetchone()
 
 
-def server_stats_dict(con: sqlite3.Connection, config: AppConfig = DEFAULT_APP_CONFIG) -> dict[str, Any]:
+def server_stats_dict(
+    con: sqlite3.Connection,
+    config: AppConfig = DEFAULT_APP_CONFIG,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+) -> dict[str, Any]:
     nonzero_cost_unit_expr = nonzero_cost_unit_expression("", config)
+    clauses = []
+    params: list[Any] = []
+    parsed_since = parse_datetime_filter(since)
+    parsed_until = parse_datetime_filter(until, end_of_day=True)
+    if parsed_since:
+        clauses.append("source_received_at >= ?")
+        params.append(parsed_since)
+    if parsed_until:
+        clauses.append("source_received_at <= ?")
+        params.append(parsed_until)
+    where_sql = ("where " + " and ".join(clauses)) if clauses else ""
+    cost_where_sql = "where " + " and ".join([f"{nonzero_cost_unit_expr} is not null", *clauses])
     totals = con.execute(
         f"""
         select
@@ -4328,7 +4478,10 @@ def server_stats_dict(con: sqlite3.Connection, config: AppConfig = DEFAULT_APP_C
             min(source_received_at) as first_seen,
             max(source_received_at) as last_seen
         from usage_events
+        {where_sql}
         """
+        ,
+        params,
     ).fetchone()
     cost_totals = [
         dict(row)
@@ -4338,10 +4491,11 @@ def server_stats_dict(con: sqlite3.Connection, config: AppConfig = DEFAULT_APP_C
                 {nonzero_cost_unit_expr} as cost_unit,
                 coalesce(sum(cost_value), 0) as cost_value
             from usage_events
-            where {nonzero_cost_unit_expr} is not null
+            {cost_where_sql}
             group by 1
             order by case when {nonzero_cost_unit_expr} = 'USD' then 0 else 1 end, 1
-            """
+            """,
+            params,
         ).fetchall()
     ]
     clients = con.execute("select count(*) from clients where revoked_at is null").fetchone()[0]

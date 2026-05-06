@@ -1,4 +1,5 @@
 import argparse
+import datetime as dt
 import io
 import json
 import os
@@ -1664,12 +1665,14 @@ class ClientSyncTests(unittest.TestCase):
 class ServerHttpTests(unittest.TestCase):
     def assertSharedNav(self, body, active):
         expected = {
-            "admin": '<nav><div class="nav-primary"><a href="/reports">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin" class="active">Admin</a></div></nav>',
-            "usage": '<nav><div class="nav-primary"><a href="/reports" class="active">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
-            "tools": '<nav><div class="nav-primary"><a href="/reports">Token Usage</a><a href="/tools" class="active">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
+            "dashboard": '<nav><div class="nav-primary"><a href="/dashboard" class="active">Dashboard</a><a href="/reports">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
+            "admin": '<nav><div class="nav-primary"><a href="/dashboard">Dashboard</a><a href="/reports">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin" class="active">Admin</a></div></nav>',
+            "usage": '<nav><div class="nav-primary"><a href="/dashboard">Dashboard</a><a href="/reports" class="active">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
+            "tools": '<nav><div class="nav-primary"><a href="/dashboard">Dashboard</a><a href="/reports">Token Usage</a><a href="/tools" class="active">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
         }[active]
         self.assertIn(expected, body)
         self.assertIn('href="/admin"', body)
+        self.assertIn('href="/dashboard"', body)
         self.assertIn('href="/reports"', body)
         self.assertIn('href="/tools"', body)
         self.assertIn('html[data-theme="dark"]', body)
@@ -2226,6 +2229,14 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("<th>provider</th>", body)
             self.assertIn("<th>source</th>", body)
             self.assertIn("<th>model</th>", body)
+            self.assertIn('name="since" type="date"', body)
+            self.assertIn('name="until" type="date"', body)
+            self.assertIn('name="source_provider"', body)
+            self.assertIn('name="source_label"', body)
+            self.assertNotIn("Tool events", body)
+            self.assertNotIn('name="source_kind"', body)
+            self.assertNotIn('name="workspace_label"', body)
+            self.assertNotIn('name="api_key_label"', body)
             self.assertIn("Collector", body)
             self.assertIn("Collectors", body)
             self.assertIn("<td>Local OTEL</td>", body)
@@ -2235,6 +2246,47 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("<td class=\"num\">15</td>", body)
             self.assertIn('data-utc="2026-05-04T01:02:03+00:00"', body)
             self.assertIn("formatBrowserTimes", body)
+            con.close()
+
+    def test_dashboard_renders_daily_weekly_and_monthly_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            con = app.connect_server(db)
+            app.create_client_token(con, "laptop", "Laptop")
+            today = dt.datetime.now(dt.timezone.utc).replace(hour=1, minute=2, second=3, microsecond=0).isoformat()
+            app.ingest_usage_events(
+                con,
+                "laptop",
+                [
+                    {
+                        "client_event_id": "today-1",
+                        "received_at": today,
+                        "signal": "logs",
+                        "event_name": "codex.usage",
+                        "model": "gpt-test",
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                        "cost_value": 0.25,
+                        "cost_unit": "USD",
+                        "attributes_json": "{}",
+                    }
+                ],
+            )
+            con.commit()
+
+            body = app.ServerReceiver.render_dashboard(object(), con)
+
+            self.assertIn("Daily Dashboard", body)
+            self.assertSharedNav(body, "dashboard")
+            self.assertIn("Today's tokens", body)
+            self.assertIn("Today's cost", body)
+            self.assertIn("Last 7 days tokens", body)
+            self.assertIn("Last 30 days cost", body)
+            self.assertIn("Today's Usage By Source", body)
+            self.assertIn("Today's Usage By Provider", body)
+            self.assertIn("<td>Codex</td>", body)
+            self.assertIn("<td>Laptop</td>", body)
             con.close()
 
     def test_server_default_usage_report_groups_by_provider_source_model(self):
@@ -2875,6 +2927,8 @@ class ServerHttpTests(unittest.TestCase):
             self.assertSharedNav(body, "admin")
             self.assertIn("Collector Admin", body)
             self.assertIn("Create Collector Token", body)
+            self.assertIn("OpenRouter Broadcast", body)
+            self.assertIn("not configured", body)
             self.assertIn("Collector name", body)
             self.assertIn("New token, shown once", body)
             self.assertIn(token, body)
@@ -2892,6 +2946,33 @@ class ServerHttpTests(unittest.TestCase):
             self.assertEqual(row["display_name"], "Work Laptop")
             self.assertIsNotNone(row["revoked_at"])
             con.close()
+
+    def test_admin_ui_shows_openrouter_configured_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            con = app.connect_server(db)
+            config = app.AppConfig(
+                openrouter_broadcast=app.OpenRouterBroadcastConfig(
+                    enabled=True,
+                    api_key="orb_secret",
+                    required_header_name="X-Test",
+                    required_header_value="secret",
+                    retain_payload_body=False,
+                )
+            )
+
+            receiver = type("ReceiverForTest", (), {"app_config": config})()
+            body = app.ServerReceiver.render_admin(receiver, con)
+            con.close()
+
+            self.assertIn("OpenRouter Broadcast", body)
+            self.assertIn("configured", body)
+            self.assertIn("<div><div class=\"label\">Enabled</div><div class=\"value\">yes</div></div>", body)
+            self.assertIn("<div><div class=\"label\">API key</div><div class=\"value\">yes</div></div>", body)
+            self.assertIn("<div><div class=\"label\">Extra header</div><div class=\"value\">yes</div></div>", body)
+            self.assertIn("<div><div class=\"label\">Retain payloads</div><div class=\"value\">no</div></div>", body)
+            self.assertNotIn("orb_secret", body)
+            self.assertNotIn("secret", body)
 
     def test_only_revoked_clients_can_be_deleted(self):
         with tempfile.TemporaryDirectory() as tmp:
