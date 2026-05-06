@@ -2779,7 +2779,14 @@ class ServerReceiver(BaseHTTPRequestHandler):
 </body>
 </html>"""
 
-    def render_admin(self, con: sqlite3.Connection, *, message: str | None = None, token: str | None = None) -> str:
+    def render_admin(
+        self,
+        con: sqlite3.Connection,
+        *,
+        message: str | None = None,
+        token: str | None = None,
+        token_label: str = "New token",
+    ) -> str:
         app_config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
         clients = con.execute(
             """
@@ -2889,7 +2896,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
         if token:
             token_block = f"""
             <section class="notice">
-              <strong>New token, shown once:</strong>
+              <strong>{html.escape(token_label)}, shown once:</strong>
               <code>{html.escape(token)}</code>
             </section>
             """
@@ -2947,7 +2954,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </div>
     </section>
     <section class="panel">
-      <h2>Create Collector Token</h2>
+      <h2>Issue Collector Token</h2>
       <form method="post" action="/admin/clients/create" class="filters">
         <label>Collector name <input name="client_name" required pattern="[A-Za-z0-9_.-]+"></label>
         <label>Display name <input name="display_name"></label>
@@ -2955,7 +2962,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </form>
     </section>
     <section class="panel">
-      <h2>Create Admin API Key</h2>
+      <h2>Issue Admin API Key</h2>
       <form method="post" action="/admin/api-keys/create" class="filters">
         <label>Key name <input name="key_name" required pattern="[A-Za-z0-9_.-]+"></label>
         <label>Display name <input name="display_name"></label>
@@ -2963,7 +2970,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </form>
     </section>
     <section class="panel">
-      <h2>Admin API Keys</h2>
+      <h2>Existing Admin API Keys</h2>
       <table>
         <thead>
           <tr><th>Key</th><th>Display name</th><th>Status</th><th>Created</th><th>Updated</th><th>Last seen</th><th>Revoked</th><th>Actions</th></tr>
@@ -2972,7 +2979,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
       </table>
     </section>
     <section class="panel">
-      <h2>Collectors</h2>
+      <h2>Existing Collector Tokens</h2>
       <table>
         <thead>
           <tr><th>Collector</th><th>Display name</th><th>Status</th><th>Created</th><th>Updated</th><th>Last seen</th><th>Revoked</th><th>Actions</th></tr>
@@ -3269,7 +3276,10 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 except sqlite3.IntegrityError:
                     self.send_html(409, self.render_admin(con, message=f"Client {client_name} already exists."))
                     return
-                self.send_html(200, self.render_admin(con, message=f"Created {client_name}.", token=token))
+                self.send_html(
+                    200,
+                    self.render_admin(con, message=f"Created {client_name}.", token=token, token_label="New collector token"),
+                )
                 return
             if parsed.path == "/admin/clients/rename":
                 form = self.read_form()
@@ -3310,7 +3320,15 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 except sqlite3.IntegrityError:
                     self.send_html(409, self.render_admin(con, message=f"Admin API key {key_name} already exists."))
                     return
-                self.send_html(200, self.render_admin(con, message=f"Created admin API key {key_name}.", token=token))
+                self.send_html(
+                    200,
+                    self.render_admin(
+                        con,
+                        message=f"Created admin API key {key_name}.",
+                        token=token,
+                        token_label="New admin API key",
+                    ),
+                )
                 return
             if parsed.path == "/admin/api-keys/rename":
                 form = self.read_form()
