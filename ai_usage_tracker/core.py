@@ -1804,16 +1804,32 @@ def server_html_cell(column: str, value: Any, *, classes: str = "") -> str:
     return f"<td{class_attr}>{html.escape(format_cell(column, value))}</td>"
 
 
-def format_cost_summary(stats: Mapping[str, Any]) -> str:
+def format_cost_value(value: Any, *, decimals: int | None = None, min_nonzero: bool = False) -> str:
+    if value in (None, ""):
+        return ""
+    amount = float(value)
+    if decimals is not None:
+        if min_nonzero and amount != 0 and round(abs(amount), decimals) == 0:
+            threshold = 10 ** -decimals
+            sign = "-" if amount < 0 else ""
+            return f"{sign}<{threshold:.{decimals}f}"
+        return f"{amount:.{decimals}f}"
+    return f"{amount:.6f}".rstrip("0").rstrip(".") if amount else "0"
+
+
+def format_cost_summary(stats: Mapping[str, Any], *, decimals: int | None = None, min_nonzero: bool = False) -> str:
     cost_totals = stats.get("cost_totals") or []
     if cost_totals:
         parts = []
         for row in cost_totals:
-            value = format_cell("cost_value", row.get("cost_value"))
+            value = format_cost_value(row.get("cost_value"), decimals=decimals, min_nonzero=min_nonzero)
             unit = str(row.get("cost_unit") or "")
             parts.append(f"{value} {unit}".strip())
         return " + ".join(parts)
-    return f'{format_cell("cost_value", stats.get("cost_value"))} {str(stats.get("cost_unit") or "")}'.strip()
+    return (
+        f'{format_cost_value(stats.get("cost_value"), decimals=decimals, min_nonzero=min_nonzero)} '
+        f'{str(stats.get("cost_unit") or "")}'
+    ).strip()
 
 
 def default_columns(group_by: str) -> tuple[str, ...]:
@@ -1900,6 +1916,16 @@ def tool_default_columns(group_by: str) -> tuple[str, ...]:
 
 
 def server_default_columns(group_by: str) -> tuple[str, ...]:
+    usage_metric_columns = (
+        "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+        "cost_value",
+        "cost_unit",
+        "last_seen",
+    )
     source_columns = {
         "source": "source_kind",
         "workspace": "workspace_label",
@@ -1908,102 +1934,30 @@ def server_default_columns(group_by: str) -> tuple[str, ...]:
         "model-provider": "provider_name",
     }
     if group_by in source_columns:
-        return (
-            source_columns[group_by],
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-            "last_seen",
-        )
+        return (source_columns[group_by], *usage_metric_columns)
     if group_by == "provider-source":
-        return (
-            "source_provider",
-            "source_label",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-            "last_seen",
-        )
+        return ("source_provider", "source_label", *usage_metric_columns)
     if group_by == "provider-source-model":
-        return (
-            "source_provider",
-            "source_label",
-            "model",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-            "last_seen",
-        )
+        return ("source_provider", "source_label", "model", *usage_metric_columns)
     if group_by == "client":
-        return (
-            "client_name",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-            "last_seen",
-        )
+        return ("client_name", *usage_metric_columns)
     if group_by == "client-model":
-        return (
-            "client_name",
-            "model",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-            "last_seen",
-        )
+        return ("client_name", "model", *usage_metric_columns)
     if group_by == "day-client":
-        return (
-            "period",
-            "client_name",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-        )
+        return ("period", "client_name", *usage_metric_columns)
     if group_by == "day-model-client":
-        return (
-            "period",
-            "client_name",
-            "model",
-            "events",
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "reasoning_tokens",
-            "cost_value",
-            "cost_unit",
-        )
-    return default_columns(group_by)
+        return ("period", "client_name", "model", *usage_metric_columns)
+    if group_by == "model":
+        return ("model", *usage_metric_columns)
+    if group_by == "session":
+        return ("session_id", *usage_metric_columns)
+    if group_by == "day":
+        return ("period", *usage_metric_columns)
+    if group_by == "day-model":
+        return ("period", "model", *usage_metric_columns)
+    if group_by == "day-session":
+        return ("period", "session_id", *usage_metric_columns)
+    return usage_metric_columns
 
 
 def server_tool_default_columns(group_by: str) -> tuple[str, ...]:
@@ -2103,6 +2057,7 @@ def print_table(rows: Sequence[sqlite3.Row], columns: Sequence[str] = REPORT_COL
 
 def server_nav(active: str) -> str:
     items = (
+        ("dashboard", "/dashboard", "Dashboard"),
         ("usage", "/reports", "Token Usage"),
         ("tools", "/tools", "Tool Usage"),
     )
@@ -2121,6 +2076,10 @@ def server_nav(active: str) -> str:
         "</div>"
         "</nav>"
     )
+
+
+def server_viewport_meta() -> str:
+    return '<meta name="viewport" content="width=device-width, initial-scale=1">'
 
 
 def is_plain_release_version(version: str) -> bool:
@@ -2232,9 +2191,9 @@ def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
     return f"""
     :root {{ color-scheme: light; --bg: #fbfcfd; --text: #17202a; --muted: #5b6773; --surface: #ffffff; --surface-soft: #f3f6f8; --border: #d7dde3; --border-strong: #cfd7df; --active-bg: #17202a; --active-text: #ffffff; --danger-bg: #fdecec; --danger-border: #efb1b1; --danger-text: #9f1d1d; --ok-bg: #eaf7ee; --ok-border: #afd9bb; --ok-text: #1d6b38; }}
     html[data-theme="dark"] {{ color-scheme: dark; --bg: #111418; --text: #edf2f7; --muted: #a8b3bf; --surface: #181d23; --surface-soft: #202731; --border: #303946; --border-strong: #465160; --active-bg: #edf2f7; --active-text: #111418; --danger-bg: #3a1f24; --danger-border: #7d3941; --danger-text: #ffb8c1; --ok-bg: #173321; --ok-border: #315f40; --ok-text: #a9e7b8; }}
-    body {{ font-family: system-ui, sans-serif; margin: 2rem; color: var(--text); background: var(--bg); }}
-    nav {{ display: flex; gap: .75rem; margin-bottom: 1.5rem; align-items: center; }}
-    .nav-primary, .nav-actions {{ display: flex; gap: .5rem; align-items: center; }}
+    body {{ font-family: system-ui, sans-serif; margin: clamp(1rem, 4vw, 2rem); color: var(--text); background: var(--bg); }}
+    nav {{ display: flex; flex-wrap: wrap; gap: .75rem; margin-bottom: 1.5rem; align-items: center; }}
+    .nav-primary, .nav-actions {{ display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }}
     .nav-actions {{ margin-left: auto; }}
     nav a, .theme-toggle {{ border: 1px solid var(--border-strong); color: var(--text); padding: .4rem .65rem; text-decoration: none; background: var(--surface); font: inherit; }}
     nav a.active {{ background: var(--active-bg); color: var(--active-text); border-color: var(--active-bg); }}
@@ -2246,8 +2205,12 @@ def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
     input, select {{ padding: .4rem; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }}
     button {{ padding: .42rem .7rem; border: 1px solid var(--active-bg); background: var(--active-bg); color: var(--active-text); }}
     .filters {{ display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; background: var(--surface); border: 1px solid var(--border); padding: .85rem; }}
-    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .75rem; }}
+    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr)); gap: .75rem; }}
+    .summary.compact {{ grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr)); }}
     .summary div {{ border: 1px solid var(--border); padding: .75rem; background: var(--surface); }}
+    .dashboard-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: 1rem; align-items: start; }}
+    .table-scroll {{ max-width: 100%; overflow-x: auto; border: 1px solid var(--border); background: var(--surface); }}
+    .table-scroll table {{ min-width: 34rem; }}
     .panel {{ display: grid; gap: .75rem; }}
     .panel-head {{ display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; }}
     .panel-head h2 {{ margin: 0; font-size: 1.05rem; }}
@@ -2258,6 +2221,14 @@ def server_page_styles(*, tools: bool = False, admin: bool = False) -> str:
     .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
     label {{ display: grid; gap: .25rem; }}
     .app-footer {{ margin-top: 2rem; color: var(--muted); font-size: .8rem; }}
+    @media (max-width: 640px) {{
+      h1 {{ font-size: 1.7rem; }}
+      .nav-actions {{ margin-left: 0; }}
+      nav a, .theme-toggle {{ padding: .36rem .52rem; }}
+      .filters {{ display: grid; grid-template-columns: 1fr; }}
+      input, select, button {{ width: 100%; box-sizing: border-box; }}
+      .value {{ font-size: 1.08rem; overflow-wrap: anywhere; }}
+    }}
 {extra}"""
 
 
@@ -2363,6 +2334,30 @@ class ServerReceiver(BaseHTTPRequestHandler):
     db_path: Path = DEFAULT_SERVER_DB
     app_config: AppConfig = DEFAULT_APP_CONFIG
 
+    @staticmethod
+    def report_args(
+        group_by: str,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 100,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            group_by=group_by,
+            since=since,
+            until=until,
+            model=None,
+            session_id=None,
+            client_name=None,
+            source_provider=None,
+            source_label=None,
+            source_kind=None,
+            workspace_label=None,
+            api_key_label=None,
+            provider_name=None,
+            limit=limit,
+        )
+
     def send_json(self, status: int, payload: dict[str, Any] | list[dict[str, Any]]) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
         self.send_response(status)
@@ -2413,6 +2408,8 @@ class ServerReceiver(BaseHTTPRequestHandler):
             model=query.get("model", [None])[0] or None,
             session_id=query.get("session_id", [None])[0] or None,
             client_name=query.get("client_name", [None])[0] or None,
+            source_provider=query.get("source_provider", [None])[0] or None,
+            source_label=query.get("source_label", [None])[0] or None,
             source_kind=query.get("source_kind", [None])[0] or None,
             workspace_label=query.get("workspace_label", [None])[0] or None,
             api_key_label=query.get("api_key_label", [None])[0] or None,
@@ -2434,17 +2431,22 @@ class ServerReceiver(BaseHTTPRequestHandler):
             group_by=group_by,
             since=query.get("since", [None])[0] or None,
             until=query.get("until", [None])[0] or None,
+            source_provider=query.get("source_provider", [None])[0] or None,
             tool_name=query.get("tool_name", [None])[0] or None,
             session_id=query.get("session_id", [None])[0] or None,
             client_name=query.get("client_name", [None])[0] or None,
             event_name=query.get("event_name", [""])[0],
+            success=query.get("success", [None])[0] or None,
+            decision=query.get("decision", [None])[0] or None,
+            source=query.get("source", [None])[0] or None,
+            mcp_server=query.get("mcp_server", [None])[0] or None,
             limit=limit,
         )
 
     def render_reports(self, con: sqlite3.Connection, query: dict[str, list[str]]) -> str:
         args = ServerReceiver.reports_args(query)
         app_config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
-        stats = server_stats_dict(con, app_config)
+        stats = server_stats_dict(con, app_config, args=args)
         rows = server_report_rows(con, args, app_config)
         columns = server_default_columns(args.group_by)
 
@@ -2474,6 +2476,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
 <html>
 <head>
   <meta charset="utf-8">
+  {server_viewport_meta()}
   <title>AI Usage Tracker Reports</title>
   {favicon}
   <script>{theme_script}</script>
@@ -2484,25 +2487,20 @@ class ServerReceiver(BaseHTTPRequestHandler):
 	  <main>
 	    <h1>Usage Reports</h1>
     <section class="summary">
-      <div><div class="label">Events</div><div class="value">{format_cell("events", stats["usage_events"])}</div></div>
       <div><div class="label">Total tokens</div><div class="value">{format_cell("total_tokens", stats["total_tokens"])}</div></div>
 	      <div><div class="label">Input</div><div class="value">{format_cell("input_tokens", stats["input_tokens"])}</div></div>
 	      <div><div class="label">Output</div><div class="value">{format_cell("output_tokens", stats["output_tokens"])}</div></div>
 	      <div><div class="label">Cost</div><div class="value">{html.escape(format_cost_summary(stats))}</div></div>
-	      <div><div class="label">Tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
       <div><div class="label">Collectors</div><div class="value">{format_cell("events", stats["configured_clients"])}</div></div>
+      <div><div class="label">Events</div><div class="value">{format_cell("events", stats["usage_events"])}</div></div>
     </section>
     <form method="get" action="/reports" class="filters">
       <label>Group by <select name="group_by">{group_options}</select></label>
-      <label>Since <input name="since" value="{field("since")}" placeholder="YYYY-MM-DD"></label>
-      <label>Until <input name="until" value="{field("until")}" placeholder="YYYY-MM-DD"></label>
-	      <label>Collector <input name="client_name" value="{field("client_name")}"></label>
+      <label>Since <input name="since" type="date" value="{field("since")}"></label>
+      <label>Until <input name="until" type="date" value="{field("until")}"></label>
+	      <label>Provider <input name="source_provider" value="{field("source_provider")}"></label>
+	      <label>Source <input name="source_label" value="{field("source_label")}"></label>
 	      <label>Model <input name="model" value="{field("model")}"></label>
-	      <label>Session <input name="session_id" value="{field("session_id")}"></label>
-	      <label>Source kind <input name="source_kind" value="{field("source_kind")}"></label>
-	      <label>Workspace <input name="workspace_label" value="{field("workspace_label")}"></label>
-	      <label>API key <input name="api_key_label" value="{field("api_key_label")}"></label>
-	      <label>Model provider <input name="provider_name" value="{field("provider_name")}"></label>
       <label>Limit <input name="limit" type="number" min="1" max="1000" value="{args.limit}"></label>
       <button type="submit">Apply</button>
     </form>
@@ -2515,9 +2513,92 @@ class ServerReceiver(BaseHTTPRequestHandler):
 </body>
 </html>"""
 
+    def render_dashboard(self, con: sqlite3.Connection) -> str:
+        app_config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
+        today = dt.datetime.now(dt.timezone.utc).date()
+        today_since = today.isoformat()
+        week_since = (today - dt.timedelta(days=6)).isoformat()
+        month_since = (today - dt.timedelta(days=29)).isoformat()
+        today_stats = server_stats_dict(con, app_config, since=today_since)
+        week_stats = server_stats_dict(con, app_config, since=week_since)
+        month_stats = server_stats_dict(con, app_config, since=month_since)
+        source_rows = server_report_rows(
+            con,
+            ServerReceiver.report_args("provider-source", since=today_since, limit=8),
+            app_config,
+        )
+        provider_rows = server_report_rows(
+            con,
+            ServerReceiver.report_args("provider", since=today_since, limit=8),
+            app_config,
+        )
+
+        def report_table(rows: Sequence[sqlite3.Row], columns: Sequence[str], empty: str) -> str:
+            headers = "".join(f"<th>{html.escape(DISPLAY_NAMES.get(column, column))}</th>" for column in columns)
+            body_rows = []
+            for row in rows:
+                cells = []
+                for column in columns:
+                    classes = "num" if column in NUMERIC_COLUMNS or column in COST_COLUMNS else ""
+                    if column == "cost_value":
+                        value = format_cost_value(row[column], decimals=2, min_nonzero=True)
+                        cells.append(f'<td class="{classes}">{html.escape(value)}</td>')
+                        continue
+                    cells.append(server_html_cell(column, row[column], classes=classes))
+                body_rows.append(f"<tr>{''.join(cells)}</tr>")
+            empty_row = f'<tr><td colspan="{len(columns)}">{html.escape(empty)}</td></tr>'
+            return (
+                '<div class="table-scroll"><table>'
+                f"<thead><tr>{headers}</tr></thead>"
+                f"<tbody>{''.join(body_rows) or empty_row}</tbody>"
+                "</table></div>"
+            )
+
+        nav = server_nav("dashboard")
+        styles = server_page_styles()
+        theme_script = server_theme_script()
+        favicon = server_favicon_link()
+        return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  {server_viewport_meta()}
+  <title>AI Usage Tracker Dashboard</title>
+  {favicon}
+  <script>{theme_script}</script>
+  <style>{styles}</style>
+</head>
+<body>
+  {nav}
+  <main>
+    <h1>Daily Dashboard</h1>
+    <section class="summary compact">
+      <div><div class="label">Today's tokens</div><div class="value">{format_cell("total_tokens", today_stats["total_tokens"])}</div></div>
+      <div><div class="label">Today's cost</div><div class="value">{html.escape(format_cost_summary(today_stats, decimals=2, min_nonzero=True))}</div></div>
+    </section>
+    <section class="summary compact">
+      <div><div class="label">Last 7 days tokens</div><div class="value">{format_cell("total_tokens", week_stats["total_tokens"])}</div></div>
+      <div><div class="label">Last 7 days cost</div><div class="value">{html.escape(format_cost_summary(week_stats, decimals=2, min_nonzero=True))}</div></div>
+      <div><div class="label">Last 30 days tokens</div><div class="value">{format_cell("total_tokens", month_stats["total_tokens"])}</div></div>
+      <div><div class="label">Last 30 days cost</div><div class="value">{html.escape(format_cost_summary(month_stats, decimals=2, min_nonzero=True))}</div></div>
+    </section>
+    <section class="dashboard-grid">
+      <div class="panel">
+        <div class="panel-head"><h2>Today's Usage By Source</h2></div>
+        {report_table(source_rows, ("source_provider", "source_label", "total_tokens", "cost_value", "cost_unit"), "No usage today.")}
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Today's Usage By Provider</h2></div>
+        {report_table(provider_rows, ("source_provider", "total_tokens", "cost_value", "cost_unit"), "No usage today.")}
+      </div>
+    </section>
+  </main>
+  {server_footer()}
+</body>
+</html>"""
+
     def render_tool_reports(self, con: sqlite3.Connection, query: dict[str, list[str]]) -> str:
         args = ServerReceiver.tool_reports_args(query)
-        stats = server_stats_dict(con)
         tool_summary = server_tool_summary(con, args)
         rows = server_tool_report_rows(con, args)
         recent_rows = server_tool_recent_rows(con, args)
@@ -2537,6 +2618,10 @@ class ServerReceiver(BaseHTTPRequestHandler):
         group_options = "\n".join(
             f'<option value="{html.escape(group)}"{" selected" if group == args.group_by else ""}>{html.escape(group)}</option>'
             for group in ServerReceiver.TOOL_REPORT_GROUPS
+        )
+        success_options = "\n".join(
+            f'<option value="{html.escape(value)}"{" selected" if value == (args.success or "") else ""}>{html.escape(label)}</option>'
+            for value, label in (("", "any"), ("true", "ok"), ("false", "fail"))
         )
         table_rows = []
         for row in rows:
@@ -2576,6 +2661,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
 <html>
 <head>
   <meta charset="utf-8">
+  {server_viewport_meta()}
   <title>AI Usage Tracker Tool Reports</title>
   {favicon}
   <script>{theme_script}</script>
@@ -2598,16 +2684,18 @@ class ServerReceiver(BaseHTTPRequestHandler):
       <div><div class="label">Failures</div><div class="value">{format_cell("failures", tool_summary["failures"])}</div></div>
       <div><div class="label">Duration</div><div class="value">{format_cell("total_duration_ms", tool_summary["total_duration_ms"])}</div></div>
       <div><div class="label">Avg duration</div><div class="value">{format_cell("avg_duration_ms", tool_summary["avg_duration_ms"])}</div></div>
-      <div><div class="label">All tool events</div><div class="value">{format_cell("tool_events", stats["tool_events"])}</div></div>
     </section>
     <form method="get" action="/tools" class="filters">
       <label>Group by <select name="group_by">{group_options}</select></label>
-      <label>Since <input name="since" value="{field("since")}" placeholder="YYYY-MM-DD"></label>
-      <label>Until <input name="until" value="{field("until")}" placeholder="YYYY-MM-DD"></label>
+      <label>Since <input name="since" type="date" value="{field("since")}"></label>
+      <label>Until <input name="until" type="date" value="{field("until")}"></label>
+      <label>Provider <input name="source_provider" value="{field("source_provider")}"></label>
       <label>Collector <input name="client_name" value="{field("client_name")}"></label>
       <label>Tool <input name="tool_name" value="{field("tool_name")}"></label>
-      <label>Event <input name="event_name" value="{field("event_name")}"></label>
-      <label>Session <input name="session_id" value="{field("session_id")}"></label>
+      <label>Success <select name="success">{success_options}</select></label>
+      <label>Decision <input name="decision" value="{field("decision")}"></label>
+      <label>Source <input name="source" value="{field("source")}"></label>
+      <label>MCP <input name="mcp_server" value="{field("mcp_server")}"></label>
       <label>Limit <input name="limit" type="number" min="1" max="1000" value="{args.limit}"></label>
       <button type="submit">Apply</button>
     </form>
@@ -2631,6 +2719,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
 </html>"""
 
     def render_admin(self, con: sqlite3.Connection, *, message: str | None = None, token: str | None = None) -> str:
+        app_config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
         clients = con.execute(
             """
             select client_name, display_name, created_at, updated_at, revoked_at, last_seen_at
@@ -2692,6 +2781,28 @@ class ServerReceiver(BaseHTTPRequestHandler):
             </section>
             """
         message_block = f"<section class=\"notice\">{html.escape(message)}</section>" if message else ""
+        openrouter = app_config.openrouter_broadcast
+        openrouter_configured = openrouter.enabled and bool(openrouter.api_key)
+        openrouter_status = "configured" if openrouter_configured else "not configured"
+        openrouter_enabled = "yes" if openrouter.enabled else "no"
+        openrouter_auth = "yes" if openrouter.api_key else "no"
+        openrouter_extra_header = "yes" if openrouter.required_header_name and openrouter.required_header_value else "no"
+        openrouter_retain = "yes" if openrouter.retain_payload_body else "no"
+        openrouter_help = {
+            "Status": "Configured only when OpenRouter Broadcast is enabled and an API key is present.",
+            "Enabled": "Shows whether the server will accept OpenRouter Broadcast ingestion requests.",
+            "API key": "Shows whether a broadcast API key is configured; the credential value is never displayed.",
+            "Extra header": "Shows whether an additional required header is configured for broadcast requests.",
+            "Retain payloads": "Shows whether raw OpenRouter Broadcast payload bodies are stored for replay/debugging.",
+        }
+
+        def status_box(label: str, value: str) -> str:
+            help_text = html.escape(openrouter_help[label], quote=True)
+            return (
+                f'<div title="{help_text}"><div class="label">{html.escape(label)}</div>'
+                f'<div class="value">{html.escape(value)}</div></div>'
+            )
+
         nav = server_nav("admin")
         styles = server_page_styles(admin=True)
         theme_script = server_theme_script()
@@ -2700,6 +2811,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
 <html>
 <head>
   <meta charset="utf-8">
+  {server_viewport_meta()}
   <title>AI Usage Tracker Admin</title>
   {favicon}
   <script>{theme_script}</script>
@@ -2711,6 +2823,16 @@ class ServerReceiver(BaseHTTPRequestHandler):
     <h1>Collector Admin</h1>
     {message_block}
     {token_block}
+    <section class="panel">
+      <h2>OpenRouter Broadcast</h2>
+      <div class="summary compact">
+        {status_box("Status", openrouter_status)}
+        {status_box("Enabled", openrouter_enabled)}
+        {status_box("API key", openrouter_auth)}
+        {status_box("Extra header", openrouter_extra_header)}
+        {status_box("Retain payloads", openrouter_retain)}
+      </div>
+    </section>
     <section class="panel">
       <h2>Create Collector Token</h2>
       <form method="post" action="/admin/clients/create" class="filters">
@@ -2736,11 +2858,14 @@ class ServerReceiver(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = parse.urlparse(self.path)
         if parsed.path in ("", "/"):
-            self.redirect("/reports")
+            self.redirect("/dashboard")
             return
         query = parse.parse_qs(parsed.query, keep_blank_values=True)
         con = connect_server(self.db_path)
         try:
+            if parsed.path == "/dashboard":
+                self.send_html(200, self.render_dashboard(con))
+                return
             if parsed.path == "/admin":
                 message = query.get("message", [None])[0]
                 self.send_html(200, self.render_admin(con, message=message))
@@ -3945,6 +4070,12 @@ def server_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
     if getattr(args, "client_name", None):
         clauses.append("usage_events.client_name = ?")
         params.append(args.client_name)
+    if getattr(args, "source_provider", None):
+        clauses.append(f"{source_provider_expression()} = ?")
+        params.append(args.source_provider)
+    if getattr(args, "source_label", None):
+        clauses.append(f"{source_label_expression()} = ?")
+        params.append(args.source_label)
     if getattr(args, "source_kind", None):
         clauses.append("usage_events.source_kind = ?")
         params.append(args.source_kind)
@@ -3971,6 +4102,9 @@ def server_tool_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
     if until:
         clauses.append("tool_events.source_received_at <= ?")
         params.append(until)
+    if getattr(args, "source_provider", None):
+        clauses.append(f"{tool_source_provider_expression()} = ?")
+        params.append(args.source_provider)
     if getattr(args, "tool_name", None):
         clauses.append("tool_events.tool_name = ?")
         params.append(args.tool_name)
@@ -3983,6 +4117,18 @@ def server_tool_where_clause(args: argparse.Namespace) -> tuple[str, list[Any]]:
     if getattr(args, "event_name", None):
         clauses.append("tool_events.event_name = ?")
         params.append(args.event_name)
+    if getattr(args, "success", None):
+        clauses.append("tool_events.success = ?")
+        params.append(args.success)
+    if getattr(args, "decision", None):
+        clauses.append("tool_events.decision = ?")
+        params.append(args.decision)
+    if getattr(args, "source", None):
+        clauses.append("tool_events.source = ?")
+        params.append(args.source)
+    if getattr(args, "mcp_server", None):
+        clauses.append("tool_events.mcp_server = ?")
+        params.append(args.mcp_server)
     return ("where " + " and ".join(clauses), params) if clauses else ("", params)
 
 
@@ -4288,6 +4434,7 @@ def server_tool_recent_rows(con: sqlite3.Connection, args: argparse.Namespace) -
 
 
 def server_tool_summary(con: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.Row:
+    register_report_functions(con)
     where, params = server_tool_where_clause(args)
     query = f"""
         select
@@ -4305,30 +4452,60 @@ def server_tool_summary(con: sqlite3.Connection, args: argparse.Namespace) -> sq
     return con.execute(query, params).fetchone()
 
 
-def server_stats_dict(con: sqlite3.Connection, config: AppConfig = DEFAULT_APP_CONFIG) -> dict[str, Any]:
-    nonzero_cost_unit_expr = nonzero_cost_unit_expression("", config)
+def server_stats_dict(
+    con: sqlite3.Connection,
+    config: AppConfig = DEFAULT_APP_CONFIG,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+    args: argparse.Namespace | None = None,
+) -> dict[str, Any]:
+    register_report_functions(con)
+    nonzero_cost_unit_expr = nonzero_cost_unit_expression("usage_events.", config)
+    clauses = []
+    params: list[Any] = []
+    if args is not None:
+        where_sql, params = server_where_clause(args)
+    else:
+        parsed_since = parse_datetime_filter(since)
+        parsed_until = parse_datetime_filter(until, end_of_day=True)
+        if parsed_since:
+            clauses.append("usage_events.source_received_at >= ?")
+            params.append(parsed_since)
+        if parsed_until:
+            clauses.append("usage_events.source_received_at <= ?")
+            params.append(parsed_until)
+        where_sql = ("where " + " and ".join(clauses)) if clauses else ""
+    cost_clauses = [f"{nonzero_cost_unit_expr} is not null"]
+    if where_sql:
+        cost_clauses.append(where_sql.removeprefix("where "))
+    cost_where_sql = "where " + " and ".join(cost_clauses)
     totals = con.execute(
         f"""
         select
             count(*) as usage_events,
-            count(distinct client_name) as active_clients,
-            coalesce(sum(input_tokens), 0) as input_tokens,
-            coalesce(sum(output_tokens), 0) as output_tokens,
-            coalesce(sum(total_tokens), 0) as total_tokens,
-            coalesce(sum(cached_tokens), 0) as cached_tokens,
-            coalesce(sum(reasoning_tokens), 0) as reasoning_tokens,
+            count(distinct usage_events.client_name) as active_clients,
+            coalesce(sum(usage_events.input_tokens), 0) as input_tokens,
+            coalesce(sum(usage_events.output_tokens), 0) as output_tokens,
+            coalesce(sum(usage_events.total_tokens), 0) as total_tokens,
+            coalesce(sum(usage_events.cached_tokens), 0) as cached_tokens,
+            coalesce(sum(usage_events.reasoning_tokens), 0) as reasoning_tokens,
             case
-              when count(distinct {nonzero_cost_unit_expr}) <= 1 then coalesce(sum(cost_value), 0)
+              when count(distinct {nonzero_cost_unit_expr}) <= 1 then coalesce(sum(usage_events.cost_value), 0)
               else null
             end as cost_value,
             case
               when count(distinct {nonzero_cost_unit_expr}) <= 1 then max({nonzero_cost_unit_expr})
               else 'mixed'
             end as cost_unit,
-            min(source_received_at) as first_seen,
-            max(source_received_at) as last_seen
+            min(usage_events.source_received_at) as first_seen,
+            max(usage_events.source_received_at) as last_seen
         from usage_events
+        left join clients on clients.client_name = usage_events.client_name
+            {where_sql}
         """
+        ,
+        params,
     ).fetchone()
     cost_totals = [
         dict(row)
@@ -4336,19 +4513,21 @@ def server_stats_dict(con: sqlite3.Connection, config: AppConfig = DEFAULT_APP_C
             f"""
             select
                 {nonzero_cost_unit_expr} as cost_unit,
-                coalesce(sum(cost_value), 0) as cost_value
+                coalesce(sum(usage_events.cost_value), 0) as cost_value
             from usage_events
-            where {nonzero_cost_unit_expr} is not null
+            left join clients on clients.client_name = usage_events.client_name
+            {cost_where_sql}
             group by 1
             order by case when {nonzero_cost_unit_expr} = 'USD' then 0 else 1 end, 1
-            """
+            """,
+            params,
         ).fetchall()
     ]
     clients = con.execute("select count(*) from clients where revoked_at is null").fetchone()[0]
     tool_events = con.execute("select count(*) from tool_events").fetchone()[0]
     out = dict(totals)
     out["cost_totals"] = cost_totals
-    out["configured_clients"] = clients
+    out["configured_clients"] = out["active_clients"] if (args is not None or since or until) else clients
     out["tool_events"] = tool_events
     return out
 

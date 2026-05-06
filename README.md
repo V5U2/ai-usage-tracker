@@ -427,16 +427,22 @@ account fields.
 Open web pages:
 
 ```text
+http://127.0.0.1:8318/dashboard
 http://127.0.0.1:8318/admin
 http://127.0.0.1:8318/reports
 http://127.0.0.1:8318/tools
 ```
 
-The admin UI creates, renames, revokes, and deletes revoked collector tokens.
-In the web UI, "collector" means the machine or ingestion process that reports
-usage to the aggregation server. Provider-side sources such as OpenRouter
-workspaces, projects, or API keys are reported separately from collector
-identity.
+The dashboard is the default web view. It shows today's tokens, cost, and usage
+events, top usage by source and provider for today, plus rolling 7-day and
+30-day token and cost totals.
+
+The admin UI creates, renames, revokes, and deletes revoked collector tokens. It
+also shows whether OpenRouter Broadcast is configured without revealing secret
+values. In the web UI, "collector" means the machine or ingestion process that
+reports usage to the aggregation server. Provider-side sources such as
+OpenRouter workspaces, projects, or API keys are reported separately from
+collector identity.
 
 The server accepts compact usage and tool-event batches from collectors at
 `POST /api/v1/usage-events`. Report APIs are available at:
@@ -449,10 +455,10 @@ GET /api/v1/stats
 
 Use `Authorization: Bearer <aggregation_server.admin_api_key>` for report APIs.
 Open `/reports` to view token totals grouped by provider, provider-side source,
-and model by default, with filters for date, collector, model, session, source
-kind, workspace, API key, model provider, grouping, and row limit. Open `/tools`
-to view captured tool calls grouped by collector and tool. The web UI keeps UTC
-timestamps in page data and displays them in the browser's local time zone.
+and model by default, with date picker filters plus provider, source, model,
+grouping, and row limit controls. Open `/tools` to view captured tool calls
+grouped by collector and tool. The web UI keeps UTC timestamps in page data and
+displays them in the browser's local time zone.
 
 Report previews:
 

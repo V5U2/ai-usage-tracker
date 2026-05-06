@@ -1,4 +1,5 @@
 import argparse
+import datetime as dt
 import io
 import json
 import os
@@ -1664,14 +1665,17 @@ class ClientSyncTests(unittest.TestCase):
 class ServerHttpTests(unittest.TestCase):
     def assertSharedNav(self, body, active):
         expected = {
-            "admin": '<nav><div class="nav-primary"><a href="/reports">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin" class="active">Admin</a></div></nav>',
-            "usage": '<nav><div class="nav-primary"><a href="/reports" class="active">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
-            "tools": '<nav><div class="nav-primary"><a href="/reports">Token Usage</a><a href="/tools" class="active">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
+            "dashboard": '<nav><div class="nav-primary"><a href="/dashboard" class="active">Dashboard</a><a href="/reports">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
+            "admin": '<nav><div class="nav-primary"><a href="/dashboard">Dashboard</a><a href="/reports">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin" class="active">Admin</a></div></nav>',
+            "usage": '<nav><div class="nav-primary"><a href="/dashboard">Dashboard</a><a href="/reports" class="active">Token Usage</a><a href="/tools">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
+            "tools": '<nav><div class="nav-primary"><a href="/dashboard">Dashboard</a><a href="/reports">Token Usage</a><a href="/tools" class="active">Tool Usage</a></div><div class="nav-actions"><button type="button" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode" onclick="aitToggleTheme()">Dark</button><a href="/admin">Admin</a></div></nav>',
         }[active]
         self.assertIn(expected, body)
         self.assertIn('href="/admin"', body)
+        self.assertIn('href="/dashboard"', body)
         self.assertIn('href="/reports"', body)
         self.assertIn('href="/tools"', body)
+        self.assertIn('<meta name="viewport" content="width=device-width, initial-scale=1">', body)
         self.assertIn('html[data-theme="dark"]', body)
         self.assertIn('localStorage.getItem("ait-theme")', body)
         self.assertIn('rel="icon" type="image/svg+xml"', body)
@@ -2226,6 +2230,22 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("<th>provider</th>", body)
             self.assertIn("<th>source</th>", body)
             self.assertIn("<th>model</th>", body)
+            self.assertLess(body.index("<th>total</th>"), body.index("<th>input</th>"))
+            self.assertLess(body.index("<th>input</th>"), body.index("<th>output</th>"))
+            self.assertLess(body.index("<th>output</th>"), body.index("<th>cached</th>"))
+            self.assertLess(body.index("<th>cached</th>"), body.index("<th>reason</th>"))
+            self.assertLess(body.index("<th>reason</th>"), body.index("<th>cost</th>"))
+            self.assertLess(body.index("<th>cost</th>"), body.index("<th>unit</th>"))
+            self.assertLess(body.index("<th>unit</th>"), body.index("<th>last</th>"))
+            self.assertNotIn("<th>events</th>", body)
+            self.assertIn('name="since" type="date"', body)
+            self.assertIn('name="until" type="date"', body)
+            self.assertIn('name="source_provider"', body)
+            self.assertIn('name="source_label"', body)
+            self.assertNotIn("Tool events", body)
+            self.assertNotIn('name="source_kind"', body)
+            self.assertNotIn('name="workspace_label"', body)
+            self.assertNotIn('name="api_key_label"', body)
             self.assertIn("Collector", body)
             self.assertIn("Collectors", body)
             self.assertIn("<td>Local OTEL</td>", body)
@@ -2236,6 +2256,114 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn('data-utc="2026-05-04T01:02:03+00:00"', body)
             self.assertIn("formatBrowserTimes", body)
             con.close()
+
+    def test_reports_page_stats_follow_filters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            for client, model, total in (("laptop", "gpt-test", 15), ("desktop", "gpt-other", 100)):
+                app.create_client_token(con, client, client.title())
+                app.ingest_usage_events(
+                    con,
+                    client,
+                    [
+                        {
+                            "client_event_id": f"{client}-usage",
+                            "received_at": "2026-05-04T01:02:03+00:00",
+                            "signal": "logs",
+                            "model": model,
+                            "total_tokens": total,
+                            "attributes_json": "{}",
+                        }
+                    ],
+                )
+            con.commit()
+
+            body = app.ServerReceiver.render_reports(object(), con, {"model": ["gpt-test"]})
+            con.close()
+
+            self.assertIn('<div class="label">Total tokens</div><div class="value">15</div>', body)
+            self.assertIn('<div class="label">Collectors</div><div class="value">1</div>', body)
+            self.assertNotIn('<div class="label">Total tokens</div><div class="value">115</div>', body)
+
+    def test_dashboard_renders_daily_weekly_and_monthly_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            con = app.connect_server(db)
+            app.create_client_token(con, "laptop", "Laptop")
+            today = dt.datetime.now(dt.timezone.utc).replace(hour=1, minute=2, second=3, microsecond=0).isoformat()
+            app.ingest_usage_events(
+                con,
+                "laptop",
+                [
+                    {
+                        "client_event_id": "today-1",
+                        "received_at": today,
+                        "signal": "logs",
+                        "event_name": "codex.usage",
+                        "model": "gpt-test",
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                        "cost_value": 0.25,
+                        "cost_unit": "USD",
+                        "attributes_json": "{}",
+                    }
+                ],
+            )
+            con.commit()
+
+            body = app.ServerReceiver.render_dashboard(object(), con)
+
+            self.assertIn("Daily Dashboard", body)
+            self.assertSharedNav(body, "dashboard")
+            self.assertIn("Today's tokens", body)
+            self.assertIn("Today's cost", body)
+            self.assertIn("0.25 USD", body)
+            self.assertNotIn("Today's events", body)
+            self.assertNotIn("Today's input", body)
+            self.assertNotIn("Today's output", body)
+            self.assertIn("Last 7 days tokens", body)
+            self.assertIn("Last 30 days cost", body)
+            self.assertIn("Today's Usage By Source", body)
+            self.assertIn("Today's Usage By Provider", body)
+            self.assertIn('class="table-scroll"', body)
+            self.assertIn("minmax(min(100%, 24rem), 1fr)", body)
+            self.assertIn("<td>Codex</td>", body)
+            self.assertIn("<td>Laptop</td>", body)
+            self.assertNotIn("<th>events</th>", body)
+            con.close()
+
+    def test_dashboard_preserves_sub_cent_costs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.create_client_token(con, "laptop", "Laptop")
+            today = dt.datetime.now(dt.timezone.utc).replace(hour=1, minute=2, second=3, microsecond=0).isoformat()
+            app.ingest_usage_events(
+                con,
+                "laptop",
+                [
+                    {
+                        "client_event_id": "sub-cent-cost",
+                        "received_at": today,
+                        "signal": "logs",
+                        "event_name": "codex.usage",
+                        "model": "gpt-test",
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                        "cost_value": 0.004,
+                        "cost_unit": "USD",
+                        "attributes_json": "{}",
+                    }
+                ],
+            )
+            con.commit()
+
+            body = app.ServerReceiver.render_dashboard(object(), con)
+            con.close()
+
+            self.assertIn("&lt;0.01 USD", body)
+            self.assertNotIn(">0.00 USD<", body)
 
     def test_server_default_usage_report_groups_by_provider_source_model(self):
         body = json.dumps(openrouter_trace_payload()).encode()
@@ -2760,6 +2888,14 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("By collector/tool", body)
             self.assertIn("<th>provider</th>", body)
             self.assertIn("<th>collector</th>", body)
+            self.assertIn('name="source_provider"', body)
+            self.assertIn('name="success"', body)
+            self.assertIn('name="decision"', body)
+            self.assertIn('name="source"', body)
+            self.assertIn('name="mcp_server"', body)
+            self.assertNotIn('name="session_id"', body)
+            self.assertNotIn('name="event_name"', body)
+            self.assertNotIn("All tool events", body)
             self.assertIn('class="status ok"', body)
             self.assertNotIn('class="status neutral"', body)
             self.assertIn("<td>Laptop</td>", body)
@@ -2777,6 +2913,46 @@ class ServerHttpTests(unittest.TestCase):
             self.assertEqual(recent_rows[0]["source_provider"], "Codex")
             self.assertIn("Intl.DateTimeFormat", body)
             con.close()
+
+    def test_tool_report_stats_follow_filters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = app.connect_server(Path(tmp) / "server.sqlite")
+            app.create_client_token(con, "laptop", "Laptop")
+            app.ingest_tool_events(
+                con,
+                "laptop",
+                [
+                    {
+                        "client_tool_event_id": "ok-tool",
+                        "received_at": "2026-05-04T01:02:03+00:00",
+                        "signal": "logs",
+                        "event_name": "codex.tool_result",
+                        "tool_name": "Bash",
+                        "success": "true",
+                        "duration_ms": 42,
+                        "attributes_json": "{}",
+                    },
+                    {
+                        "client_tool_event_id": "fail-tool",
+                        "received_at": "2026-05-04T01:02:04+00:00",
+                        "signal": "logs",
+                        "event_name": "codex.tool_result",
+                        "tool_name": "Bash",
+                        "success": "false",
+                        "duration_ms": 100,
+                        "attributes_json": "{}",
+                    },
+                ],
+            )
+            con.commit()
+
+            body = app.ServerReceiver.render_tool_reports(object(), con, {"success": ["true"]})
+            con.close()
+
+            self.assertIn('<div class="label">Matching events</div><div class="value">1</div>', body)
+            self.assertIn('<div class="label">Successes</div><div class="value">1</div>', body)
+            self.assertIn('<div class="label">Failures</div><div class="value">0</div>', body)
+            self.assertIn('<div class="label">Duration</div><div class="value">42</div>', body)
 
     def test_tool_reports_can_include_decisions_and_results(self):
         args = app.ServerReceiver.tool_reports_args({"group_by": ["event"]})
@@ -2875,6 +3051,8 @@ class ServerHttpTests(unittest.TestCase):
             self.assertSharedNav(body, "admin")
             self.assertIn("Collector Admin", body)
             self.assertIn("Create Collector Token", body)
+            self.assertIn("OpenRouter Broadcast", body)
+            self.assertIn("not configured", body)
             self.assertIn("Collector name", body)
             self.assertIn("New token, shown once", body)
             self.assertIn(token, body)
@@ -2892,6 +3070,34 @@ class ServerHttpTests(unittest.TestCase):
             self.assertEqual(row["display_name"], "Work Laptop")
             self.assertIsNotNone(row["revoked_at"])
             con.close()
+
+    def test_admin_ui_shows_openrouter_configured_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "server.sqlite"
+            con = app.connect_server(db)
+            config = app.AppConfig(
+                openrouter_broadcast=app.OpenRouterBroadcastConfig(
+                    enabled=True,
+                    api_key="orb_secret",
+                    required_header_name="X-Test",
+                    required_header_value="secret",
+                    retain_payload_body=False,
+                )
+            )
+
+            receiver = type("ReceiverForTest", (), {"app_config": config})()
+            body = app.ServerReceiver.render_admin(receiver, con)
+            con.close()
+
+            self.assertIn("OpenRouter Broadcast", body)
+            self.assertIn("configured", body)
+            self.assertIn('title="Shows whether the server will accept OpenRouter Broadcast ingestion requests."', body)
+            self.assertIn('<div class="label">Enabled</div><div class="value">yes</div>', body)
+            self.assertIn('<div class="label">API key</div><div class="value">yes</div>', body)
+            self.assertIn('<div class="label">Extra header</div><div class="value">yes</div>', body)
+            self.assertIn('<div class="label">Retain payloads</div><div class="value">no</div>', body)
+            self.assertNotIn("orb_secret", body)
+            self.assertNotIn("secret", body)
 
     def test_only_revoked_clients_can_be_deleted(self):
         with tempfile.TemporaryDirectory() as tmp:
