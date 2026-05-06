@@ -41,7 +41,7 @@ def env_value(name: str, default: str) -> str:
 
 
 REPO_URL = "https://github.com/V5U2/ai-usage-tracker"
-APP_VERSION = env_value("AI_USAGE_VERSION", "0.4.2")  # x-release-please-version
+APP_VERSION = env_value("AI_USAGE_VERSION", "0.5.0")  # x-release-please-version
 APP_COMMIT = env_value("AI_USAGE_COMMIT", "")
 DEFAULT_DB = Path(env_value("AI_USAGE_DB", "ai_usage.sqlite"))
 DEFAULT_SERVER_DB = Path(env_value("AI_USAGE_SERVER_DB", "ai_usage_server.sqlite"))
