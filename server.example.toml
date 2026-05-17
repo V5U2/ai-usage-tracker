@@ -25,10 +25,11 @@ mode = "none"
 # password_hash = "pbkdf2_sha256$..."
 
 # OIDC mode.
+# The provider discovery and returned endpoints must be public https URLs.
 # oidc_issuer = "https://auth.example.com/application/o/ai-usage-tracker/"
 # oidc_client_id = "client-id"
 # oidc_client_secret = "client-secret"
-# Optional when reverse proxy headers do not produce the public callback URL.
+# Required public callback URL registered with the provider.
 # oidc_redirect_url = "https://usage.example.com/auth/oidc/callback"
 # oidc_scopes = ["openid", "email", "profile"]
 # Optional allowlist. Set at least one when the provider app is not already restricted.

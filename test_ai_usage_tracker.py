@@ -3230,6 +3230,64 @@ class ServerHttpTests(unittest.TestCase):
             self.assertIn("response_type=code", location)
             self.assertTrue(any(key == "set-cookie" and value.startswith("ait_oidc_state=") for key, value in headers))
 
+    def test_oidc_url_validation_rejects_private_or_unsafe_endpoints(self):
+        self.assertEqual(app.validated_oidc_url("https://id.example.com/token", "token_endpoint"), "https://id.example.com/token")
+        for url in (
+            "http://id.example.com/token",
+            "https://user:pass@id.example.com/token",
+            "https://id.example.com/token#fragment",
+            "https://localhost/token",
+            "https://127.0.0.1/token",
+            "https://10.0.0.10/token",
+            "https://[::1]/token",
+            "https://169.254.169.254/latest/meta-data",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(ValueError):
+                    app.validated_oidc_url(url, "token_endpoint")
+
+    def test_oidc_code_validation_rejects_unsafe_callback_values(self):
+        self.assertEqual(app.validated_oidc_code("abc.DEF_012-~+/="), "abc.DEF_012-~+/=")
+        for code in ("", "code with space", "code\nnext", "code?next=http://127.0.0.1"):
+            with self.subTest(code=code):
+                with self.assertRaises(ValueError):
+                    app.validated_oidc_code(code)
+
+    def test_oidc_exchange_rejects_private_discovered_endpoints_before_request(self):
+        config = app.AppConfig(
+            web_auth=app.WebAuthConfig(
+                mode="oidc",
+                session_secret="test-session-secret",
+                oidc_issuer="https://id.example.com",
+                oidc_client_id="client-id",
+                oidc_client_secret="client-secret",
+                oidc_redirect_url="https://usage.example.com/auth/oidc/callback",
+            )
+        )
+        discovery = {
+            "token_endpoint": "https://169.254.169.254/token",
+            "userinfo_endpoint": "https://id.example.com/userinfo",
+        }
+
+        with patch.object(core, "oidc_discovery", return_value=discovery), patch.object(core.request, "urlopen") as urlopen:
+            with self.assertRaises(ValueError):
+                app.oidc_exchange_code(config, "code")
+
+        urlopen.assert_not_called()
+
+    def test_oidc_auth_requires_configured_redirect_url(self):
+        config = app.AppConfig(
+            web_auth=app.WebAuthConfig(
+                mode="oidc",
+                session_secret="test-session-secret",
+                oidc_issuer="https://id.example.com",
+                oidc_client_id="client-id",
+                oidc_client_secret="client-secret",
+            )
+        )
+
+        self.assertFalse(app.web_auth_configured(config))
+
     def test_admin_ui_shows_openrouter_configured_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "server.sqlite"
