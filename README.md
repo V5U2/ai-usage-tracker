@@ -164,8 +164,8 @@ Generate the password hash with:
 python3 ai_usage_tracker.py server hash-password 'your-password'
 ```
 
-For OIDC/OAuth-style login, configure a provider client with callback
-`/auth/oidc/callback`:
+For OIDC/OAuth-style login, configure a provider client with the exact public
+callback URL in `oidc_redirect_url`:
 
 ```toml
 [web_auth]
@@ -180,7 +180,11 @@ oidc_allowed_email = "you@example.com"
 
 The OIDC implementation uses the authorization-code flow and the provider
 `userinfo_endpoint`; restrict the provider application or set an allowed email
-or subject.
+or subject. OIDC discovery, token, authorization, and userinfo endpoints must
+be public `https://` URLs; localhost, private IP, link-local, and credentialed
+URLs are rejected before the server makes outbound requests. `oidc_redirect_url`
+is required for OIDC mode so callback handling does not depend on request host
+headers.
 
 New collector and admin API tokens are shown once. The server stores token
 hashes, not raw tokens. Add a generated collector token to each collector:

@@ -16,6 +16,7 @@ import datetime as dt
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import os
 import re
@@ -3083,12 +3084,13 @@ class ServerReceiver(BaseHTTPRequestHandler):
             config = getattr(self, "app_config", DEFAULT_APP_CONFIG)
             state_cookie = read_signed_cookie(config, cookie_values(self.headers).get("ait_oidc_state"))
             state = query.get("state", [""])[0]
-            code = query.get("code", [""])[0]
-            if not state_cookie or state_cookie.get("state") != state or not code:
+            raw_code = query.get("code", [""])[0]
+            if not state_cookie or state_cookie.get("state") != state or not raw_code:
                 self.send_login_page(message="Invalid OIDC callback.", next_path="/dashboard")
                 return
             try:
-                userinfo = oidc_exchange_code(config, self.headers, code)
+                code = validated_oidc_code(raw_code)
+                userinfo = oidc_exchange_code(config, code)
                 user = str(userinfo.get("email") or userinfo.get("preferred_username") or userinfo.get("sub") or "oidc-user")
                 self.set_session_and_redirect(user, "oidc", str(state_cookie.get("next") or "/dashboard"))
             except Exception as exc:
@@ -3158,7 +3160,7 @@ class ServerReceiver(BaseHTTPRequestHandler):
                 state = secrets.token_urlsafe(24)
                 nonce = secrets.token_urlsafe(24)
                 try:
-                    location = oidc_authorization_url(config, self.headers, state, nonce)
+                    location = oidc_authorization_url(config, state, nonce)
                     token = make_signed_cookie(
                         config,
                         {
@@ -4244,7 +4246,7 @@ def web_auth_configured(config: AppConfig) -> bool:
     if auth.mode == "password":
         return bool(auth.username and auth.password_hash)
     if auth.mode == "oidc":
-        return bool(auth.oidc_issuer and auth.oidc_client_id and auth.oidc_client_secret)
+        return bool(auth.oidc_issuer and auth.oidc_client_id and auth.oidc_client_secret and auth.oidc_redirect_url)
     return False
 
 
@@ -4261,10 +4263,42 @@ def web_user_from_headers(config: AppConfig, headers: Any) -> str | None:
     return str(user) if user else None
 
 
+def validated_oidc_url(raw_url: Any, field_name: str) -> str:
+    if not isinstance(raw_url, str) or not raw_url:
+        raise ValueError(f"OIDC {field_name} URL is required")
+    parsed = parse.urlsplit(raw_url)
+    if parsed.scheme != "https":
+        raise ValueError(f"OIDC {field_name} URL must use https")
+    if not parsed.hostname:
+        raise ValueError(f"OIDC {field_name} URL must include a host")
+    if parsed.username or parsed.password:
+        raise ValueError(f"OIDC {field_name} URL must not include credentials")
+    if parsed.fragment:
+        raise ValueError(f"OIDC {field_name} URL must not include a fragment")
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ValueError(f"OIDC {field_name} URL must not use localhost")
+    try:
+        address = ipaddress.ip_address(hostname.strip("[]"))
+    except ValueError:
+        address = None
+    if address and not address.is_global:
+        raise ValueError(f"OIDC {field_name} URL must not use a private or local IP address")
+    return parse.urlunsplit(parsed)
+
+
+def validated_oidc_code(raw_code: Any) -> str:
+    if not isinstance(raw_code, str) or not raw_code:
+        raise ValueError("OIDC authorization code is required")
+    if len(raw_code) > 4096:
+        raise ValueError("OIDC authorization code is too long")
+    if not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", raw_code):
+        raise ValueError("OIDC authorization code contains invalid characters")
+    return raw_code
+
+
 def oidc_discovery(config: AppConfig) -> dict[str, Any]:
-    issuer = (config.web_auth.oidc_issuer or "").rstrip("/")
-    if not issuer:
-        raise ValueError("web_auth.oidc_issuer is required")
+    issuer = validated_oidc_url((config.web_auth.oidc_issuer or "").rstrip("/"), "issuer")
     with request.urlopen(f"{issuer}/.well-known/openid-configuration", timeout=10) as response:
         payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, dict):
@@ -4272,25 +4306,19 @@ def oidc_discovery(config: AppConfig) -> dict[str, Any]:
     return payload
 
 
-def oidc_redirect_uri(config: AppConfig, headers: Any) -> str:
+def oidc_redirect_uri(config: AppConfig) -> str:
     if config.web_auth.oidc_redirect_url:
         return config.web_auth.oidc_redirect_url
-    proto = headers.get("x-forwarded-proto") or headers.get("X-Forwarded-Proto") or "http"
-    host = headers.get("x-forwarded-host") or headers.get("X-Forwarded-Host") or headers.get("host") or headers.get("Host")
-    if not host:
-        raise ValueError("Host header is required to build OIDC redirect URL")
-    return f"{proto}://{host}/auth/oidc/callback"
+    raise ValueError("web_auth.oidc_redirect_url is required")
 
 
-def oidc_authorization_url(config: AppConfig, headers: Any, state: str, nonce: str) -> str:
+def oidc_authorization_url(config: AppConfig, state: str, nonce: str) -> str:
     discovery = oidc_discovery(config)
-    endpoint = discovery.get("authorization_endpoint")
-    if not endpoint:
-        raise ValueError("OIDC discovery document has no authorization_endpoint")
+    endpoint = validated_oidc_url(discovery.get("authorization_endpoint"), "authorization_endpoint")
     query = parse.urlencode(
         {
             "client_id": config.web_auth.oidc_client_id,
-            "redirect_uri": oidc_redirect_uri(config, headers),
+            "redirect_uri": oidc_redirect_uri(config),
             "response_type": "code",
             "scope": " ".join(config.web_auth.oidc_scopes),
             "state": state,
@@ -4300,17 +4328,15 @@ def oidc_authorization_url(config: AppConfig, headers: Any, state: str, nonce: s
     return f"{endpoint}?{query}"
 
 
-def oidc_exchange_code(config: AppConfig, headers: Any, code: str) -> dict[str, Any]:
+def oidc_exchange_code(config: AppConfig, code: str) -> dict[str, Any]:
     discovery = oidc_discovery(config)
-    token_endpoint = discovery.get("token_endpoint")
-    userinfo_endpoint = discovery.get("userinfo_endpoint")
-    if not token_endpoint or not userinfo_endpoint:
-        raise ValueError("OIDC discovery document must include token_endpoint and userinfo_endpoint")
+    token_endpoint = validated_oidc_url(discovery.get("token_endpoint"), "token_endpoint")
+    userinfo_endpoint = validated_oidc_url(discovery.get("userinfo_endpoint"), "userinfo_endpoint")
     form = parse.urlencode(
         {
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": oidc_redirect_uri(config, headers),
+            "redirect_uri": oidc_redirect_uri(config),
             "client_id": config.web_auth.oidc_client_id,
             "client_secret": config.web_auth.oidc_client_secret,
         }
