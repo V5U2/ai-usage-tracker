@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/V5U2/ai-usage-tracker/compare/v0.5.0...v0.5.1) (2026-06-18)
+
+
+### Bug Fixes
+
+* reject unsafe OIDC endpoints ([0850b1c](https://github.com/V5U2/ai-usage-tracker/commit/0850b1cd86ee01499be30f6ba6e4763d4c8efd74))
+
 ## [0.5.0](https://github.com/V5U2/ai-usage-tracker/compare/v0.4.2...v0.5.0) (2026-05-06)
 
 
